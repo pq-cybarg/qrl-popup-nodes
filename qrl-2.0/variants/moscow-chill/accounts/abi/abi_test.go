@@ -1,0 +1,1217 @@
+// Copyright 2015 The go-ethereum Authors
+// This file is part of the go-ethereum library.
+//
+// The go-ethereum library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Lesser General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The go-ethereum library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public License
+// along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
+
+package abi
+
+import (
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"math/big"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/theQRL/go-qrl/common"
+	"github.com/theQRL/go-qrl/crypto"
+)
+
+const jsondata = `
+[
+	{ "type" : "function", "name" : ""},
+	{ "type" : "function", "name" : "balance", "stateMutability" : "view" },
+	{ "type" : "function", "name" : "send", "inputs" : [ { "name" : "amount", "type" : "uint256" } ] },
+	{ "type" : "function", "name" : "test", "inputs" : [ { "name" : "number", "type" : "uint32" } ] },
+	{ "type" : "function", "name" : "string", "inputs" : [ { "name" : "inputs", "type" : "string" } ] },
+	{ "type" : "function", "name" : "bool", "inputs" : [ { "name" : "inputs", "type" : "bool" } ] },
+	{ "type" : "function", "name" : "address", "inputs" : [ { "name" : "inputs", "type" : "address" } ] },
+	{ "type" : "function", "name" : "uint64[2]", "inputs" : [ { "name" : "inputs", "type" : "uint64[2]" } ] },
+	{ "type" : "function", "name" : "uint64[]", "inputs" : [ { "name" : "inputs", "type" : "uint64[]" } ] },
+	{ "type" : "function", "name" : "int8", "inputs" : [ { "name" : "inputs", "type" : "int8" } ] },
+	{ "type" : "function", "name" : "bytes32", "inputs" : [ { "name" : "inputs", "type" : "bytes32" } ] },
+	{ "type" : "function", "name" : "foo", "inputs" : [ { "name" : "inputs", "type" : "uint32" } ] },
+	{ "type" : "function", "name" : "bar", "inputs" : [ { "name" : "inputs", "type" : "uint32" }, { "name" : "string", "type" : "uint16" } ] },
+	{ "type" : "function", "name" : "slice", "inputs" : [ { "name" : "inputs", "type" : "uint32[2]" } ] },
+	{ "type" : "function", "name" : "slice256", "inputs" : [ { "name" : "inputs", "type" : "uint256[2]" } ] },
+	{ "type" : "function", "name" : "sliceAddress", "inputs" : [ { "name" : "inputs", "type" : "address[]" } ] },
+	{ "type" : "function", "name" : "sliceMultiAddress", "inputs" : [ { "name" : "a", "type" : "address[]" }, { "name" : "b", "type" : "address[]" } ] },
+	{ "type" : "function", "name" : "nestedArray", "inputs" : [ { "name" : "a", "type" : "uint256[2][2]" }, { "name" : "b", "type" : "address[]" } ] },
+	{ "type" : "function", "name" : "nestedArray2", "inputs" : [ { "name" : "a", "type" : "uint8[][2]" } ] },
+	{ "type" : "function", "name" : "nestedSlice", "inputs" : [ { "name" : "a", "type" : "uint8[][]" } ] },
+	{ "type" : "function", "name" : "receive", "inputs" : [ { "name" : "memo", "type" : "bytes" }], "outputs" : [], "payable" : true, "stateMutability" : "payable" },
+	{ "type" : "function", "name" : "fixedArrStr", "stateMutability" : "view", "inputs" : [ { "name" : "str", "type" : "string" }, { "name" : "fixedArr", "type" : "uint256[2]" } ] },
+	{ "type" : "function", "name" : "fixedArrBytes", "stateMutability" : "view", "inputs" : [ { "name" : "bytes", "type" : "bytes" }, { "name" : "fixedArr", "type" : "uint256[2]" } ] },
+	{ "type" : "function", "name" : "mixedArrStr", "stateMutability" : "view", "inputs" : [ { "name" : "str", "type" : "string" }, { "name" : "fixedArr", "type" : "uint256[2]" }, { "name" : "dynArr", "type" : "uint256[]" } ] },
+	{ "type" : "function", "name" : "doubleFixedArrStr", "stateMutability" : "view", "inputs" : [ { "name" : "str", "type" : "string" }, { "name" : "fixedArr1", "type" : "uint256[2]" }, { "name" : "fixedArr2", "type" : "uint256[3]" } ] },
+	{ "type" : "function", "name" : "multipleMixedArrStr", "stateMutability" : "view", "inputs" : [ { "name" : "str", "type" : "string" }, { "name" : "fixedArr1", "type" : "uint256[2]" }, { "name" : "dynArr", "type" : "uint256[]" }, { "name" : "fixedArr2", "type" : "uint256[3]" } ] },
+	{ "type" : "function", "name" : "overloadedNames", "stateMutability" : "view", "inputs": [ { "components": [ { "internalType": "uint256", "name": "_f",	"type": "uint256" }, { "internalType": "uint256", "name": "__f", "type": "uint256"}, { "internalType": "uint256", "name": "f", "type": "uint256"}],"internalType": "struct Overloader.F", "name": "f","type": "tuple"}]}
+]`
+
+var (
+	Uint256, _    = NewType("uint256", "", nil)
+	Uint32, _     = NewType("uint32", "", nil)
+	Uint16, _     = NewType("uint16", "", nil)
+	String, _     = NewType("string", "", nil)
+	Bool, _       = NewType("bool", "", nil)
+	Bytes, _      = NewType("bytes", "", nil)
+	Bytes32, _    = NewType("bytes32", "", nil)
+	Address, _    = NewType("address", "", nil)
+	Uint64Arr, _  = NewType("uint64[]", "", nil)
+	AddressArr, _ = NewType("address[]", "", nil)
+	Int8, _       = NewType("int8", "", nil)
+	// Special types for testing
+	Uint32Arr2, _       = NewType("uint32[2]", "", nil)
+	Uint64Arr2, _       = NewType("uint64[2]", "", nil)
+	Uint256Arr, _       = NewType("uint256[]", "", nil)
+	Uint256Arr2, _      = NewType("uint256[2]", "", nil)
+	Uint256Arr3, _      = NewType("uint256[3]", "", nil)
+	Uint256ArrNested, _ = NewType("uint256[2][2]", "", nil)
+	Uint8ArrNested, _   = NewType("uint8[][2]", "", nil)
+	Uint8SliceNested, _ = NewType("uint8[][]", "", nil)
+	TupleF, _           = NewType("tuple", "struct Overloader.F", []ArgumentMarshaling{
+		{Name: "_f", Type: "uint256"},
+		{Name: "__f", Type: "uint256"},
+		{Name: "f", Type: "uint256"}})
+)
+
+var methods = map[string]Method{
+	"":                    NewMethod("", "", Function, "", nil, nil),
+	"balance":             NewMethod("balance", "balance", Function, "view", nil, nil),
+	"send":                NewMethod("send", "send", Function, "", []Argument{{"amount", Uint256, false}}, nil),
+	"test":                NewMethod("test", "test", Function, "", []Argument{{"number", Uint32, false}}, nil),
+	"string":              NewMethod("string", "string", Function, "", []Argument{{"inputs", String, false}}, nil),
+	"bool":                NewMethod("bool", "bool", Function, "", []Argument{{"inputs", Bool, false}}, nil),
+	"address":             NewMethod("address", "address", Function, "", []Argument{{"inputs", Address, false}}, nil),
+	"uint64[]":            NewMethod("uint64[]", "uint64[]", Function, "", []Argument{{"inputs", Uint64Arr, false}}, nil),
+	"uint64[2]":           NewMethod("uint64[2]", "uint64[2]", Function, "", []Argument{{"inputs", Uint64Arr2, false}}, nil),
+	"int8":                NewMethod("int8", "int8", Function, "", []Argument{{"inputs", Int8, false}}, nil),
+	"bytes32":             NewMethod("bytes32", "bytes32", Function, "", []Argument{{"inputs", Bytes32, false}}, nil),
+	"foo":                 NewMethod("foo", "foo", Function, "", []Argument{{"inputs", Uint32, false}}, nil),
+	"bar":                 NewMethod("bar", "bar", Function, "", []Argument{{"inputs", Uint32, false}, {"string", Uint16, false}}, nil),
+	"slice":               NewMethod("slice", "slice", Function, "", []Argument{{"inputs", Uint32Arr2, false}}, nil),
+	"slice256":            NewMethod("slice256", "slice256", Function, "", []Argument{{"inputs", Uint256Arr2, false}}, nil),
+	"sliceAddress":        NewMethod("sliceAddress", "sliceAddress", Function, "", []Argument{{"inputs", AddressArr, false}}, nil),
+	"sliceMultiAddress":   NewMethod("sliceMultiAddress", "sliceMultiAddress", Function, "", []Argument{{"a", AddressArr, false}, {"b", AddressArr, false}}, nil),
+	"nestedArray":         NewMethod("nestedArray", "nestedArray", Function, "", []Argument{{"a", Uint256ArrNested, false}, {"b", AddressArr, false}}, nil),
+	"nestedArray2":        NewMethod("nestedArray2", "nestedArray2", Function, "", []Argument{{"a", Uint8ArrNested, false}}, nil),
+	"nestedSlice":         NewMethod("nestedSlice", "nestedSlice", Function, "", []Argument{{"a", Uint8SliceNested, false}}, nil),
+	"receive":             NewMethod("receive", "receive", Function, "payable", []Argument{{"memo", Bytes, false}}, []Argument{}),
+	"fixedArrStr":         NewMethod("fixedArrStr", "fixedArrStr", Function, "view", []Argument{{"str", String, false}, {"fixedArr", Uint256Arr2, false}}, nil),
+	"fixedArrBytes":       NewMethod("fixedArrBytes", "fixedArrBytes", Function, "view", []Argument{{"bytes", Bytes, false}, {"fixedArr", Uint256Arr2, false}}, nil),
+	"mixedArrStr":         NewMethod("mixedArrStr", "mixedArrStr", Function, "view", []Argument{{"str", String, false}, {"fixedArr", Uint256Arr2, false}, {"dynArr", Uint256Arr, false}}, nil),
+	"doubleFixedArrStr":   NewMethod("doubleFixedArrStr", "doubleFixedArrStr", Function, "view", []Argument{{"str", String, false}, {"fixedArr1", Uint256Arr2, false}, {"fixedArr2", Uint256Arr3, false}}, nil),
+	"multipleMixedArrStr": NewMethod("multipleMixedArrStr", "multipleMixedArrStr", Function, "view", []Argument{{"str", String, false}, {"fixedArr1", Uint256Arr2, false}, {"dynArr", Uint256Arr, false}, {"fixedArr2", Uint256Arr3, false}}, nil),
+	"overloadedNames":     NewMethod("overloadedNames", "overloadedNames", Function, "view", []Argument{{"f", TupleF, false}}, nil),
+}
+
+func TestReader(t *testing.T) {
+	t.Parallel()
+	abi := ABI{
+		Methods: methods,
+	}
+
+	exp, err := JSON(strings.NewReader(jsondata))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, expM := range exp.Methods {
+		gotM, exist := abi.Methods[name]
+		if !exist {
+			t.Errorf("Missing expected method %v", name)
+		}
+		if !reflect.DeepEqual(gotM, expM) {
+			t.Errorf("\nGot abi method: \n%v\ndoes not match expected method\n%v", gotM, expM)
+		}
+	}
+
+	for name, gotM := range abi.Methods {
+		expM, exist := exp.Methods[name]
+		if !exist {
+			t.Errorf("Found extra method %v", name)
+		}
+		if !reflect.DeepEqual(gotM, expM) {
+			t.Errorf("\nGot abi method: \n%v\ndoes not match expected method\n%v", gotM, expM)
+		}
+	}
+}
+
+func TestInvalidABI(t *testing.T) {
+	t.Parallel()
+	json := `[{ "type" : "function", "name" : "", "constant" : fals }]`
+	_, err := JSON(strings.NewReader(json))
+	if err == nil {
+		t.Fatal("invalid json should produce error")
+	}
+	json2 := `[{ "type" : "function", "name" : "send", "constant" : false, "inputs" : [ { "name" : "amount", "typ" : "uint256" } ] }]`
+	_, err = JSON(strings.NewReader(json2))
+	if err == nil {
+		t.Fatal("invalid json should produce error")
+	}
+}
+
+// TestConstructor tests a constructor function.
+// The test is based on the following contract:
+//
+//	contract TestConstructor {
+//		constructor(uint256 a, uint256 b) public{}
+//	}
+func TestConstructor(t *testing.T) {
+	t.Parallel()
+	json := `[{	"inputs": [{"internalType": "uint256","name": "a","type": "uint256"	},{	"internalType": "uint256","name": "b","type": "uint256"}],"stateMutability": "nonpayable","type": "constructor"}]`
+	method := NewMethod("", "", Constructor, "nonpayable", []Argument{{"a", Uint256, false}, {"b", Uint256, false}}, nil)
+	// Test from JSON
+	abi, err := JSON(strings.NewReader(json))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(abi.Constructor, method) {
+		t.Error("Missing expected constructor")
+	}
+	// Test pack/unpack
+	packed, err := abi.Pack("", big.NewInt(1), big.NewInt(2))
+	if err != nil {
+		t.Error(err)
+	}
+	unpacked, err := abi.Constructor.Inputs.Unpack(packed)
+	if err != nil {
+		t.Error(err)
+	}
+
+	if !reflect.DeepEqual(unpacked[0], big.NewInt(1)) {
+		t.Error("Unable to pack/unpack from constructor")
+	}
+	if !reflect.DeepEqual(unpacked[1], big.NewInt(2)) {
+		t.Error("Unable to pack/unpack from constructor")
+	}
+}
+
+func TestTestNumbers(t *testing.T) {
+	t.Parallel()
+	abi, err := JSON(strings.NewReader(jsondata))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := abi.Pack("balance"); err != nil {
+		t.Error(err)
+	}
+
+	if _, err := abi.Pack("balance", 1); err == nil {
+		t.Error("expected error for balance(1)")
+	}
+
+	if _, err := abi.Pack("doesntexist", nil); err == nil {
+		t.Errorf("doesntexist shouldn't exist")
+	}
+
+	if _, err := abi.Pack("doesntexist", 1); err == nil {
+		t.Errorf("doesntexist(1) shouldn't exist")
+	}
+
+	if _, err := abi.Pack("send", big.NewInt(1000)); err != nil {
+		t.Error(err)
+	}
+
+	i := new(int)
+	*i = 1000
+	if _, err := abi.Pack("send", i); err == nil {
+		t.Errorf("expected send( ptr ) to throw, requires *big.Int instead of *int")
+	}
+
+	if _, err := abi.Pack("test", uint32(1000)); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestMethodSignature(t *testing.T) {
+	t.Parallel()
+	m := NewMethod("foo", "foo", Function, "", []Argument{{"bar", String, false}, {"baz", String, false}}, nil)
+	exp := "foo(string,string)"
+	if m.Sig != exp {
+		t.Error("signature mismatch", exp, "!=", m.Sig)
+	}
+
+	idexp := crypto.Keccak256([]byte(exp))[:4]
+	if !bytes.Equal(m.ID, idexp) {
+		t.Errorf("expected ids to match %x != %x", m.ID, idexp)
+	}
+
+	m = NewMethod("foo", "foo", Function, "", []Argument{{"bar", Uint256, false}}, nil)
+	exp = "foo(uint256)"
+	if m.Sig != exp {
+		t.Error("signature mismatch", exp, "!=", m.Sig)
+	}
+
+	// Method with tuple arguments
+	s, _ := NewType("tuple", "", []ArgumentMarshaling{
+		{Name: "a", Type: "int256"},
+		{Name: "b", Type: "int256[]"},
+		{Name: "c", Type: "tuple[]", Components: []ArgumentMarshaling{
+			{Name: "x", Type: "int256"},
+			{Name: "y", Type: "int256"},
+		}},
+		{Name: "d", Type: "tuple[2]", Components: []ArgumentMarshaling{
+			{Name: "x", Type: "int256"},
+			{Name: "y", Type: "int256"},
+		}},
+	})
+	m = NewMethod("foo", "foo", Function, "", []Argument{{"s", s, false}, {"bar", String, false}}, nil)
+	exp = "foo((int256,int256[],(int256,int256)[],(int256,int256)[2]),string)"
+	if m.Sig != exp {
+		t.Error("signature mismatch", exp, "!=", m.Sig)
+	}
+}
+
+func TestOverloadedMethodSignature(t *testing.T) {
+	t.Parallel()
+	json := `[{"constant":true,"inputs":[{"name":"i","type":"uint256"},{"name":"j","type":"uint256"}],"name":"foo","outputs":[],"payable":false,"stateMutability":"pure","type":"function"},{"constant":true,"inputs":[{"name":"i","type":"uint256"}],"name":"foo","outputs":[],"payable":false,"stateMutability":"pure","type":"function"},{"anonymous":false,"inputs":[{"indexed":false,"name":"i","type":"uint256"}],"name":"bar","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"name":"i","type":"uint256"},{"indexed":false,"name":"j","type":"uint256"}],"name":"bar","type":"event"}]`
+	abi, err := JSON(strings.NewReader(json))
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(name string, expect string, method bool) {
+		if method {
+			if abi.Methods[name].Sig != expect {
+				t.Fatalf("The signature of overloaded method mismatch, want %s, have %s", expect, abi.Methods[name].Sig)
+			}
+		} else {
+			if abi.Events[name].Sig != expect {
+				t.Fatalf("The signature of overloaded event mismatch, want %s, have %s", expect, abi.Events[name].Sig)
+			}
+		}
+	}
+	check("foo", "foo(uint256,uint256)", true)
+	check("foo0", "foo(uint256)", true)
+	check("bar", "bar(uint256)", false)
+	check("bar0", "bar(uint256,uint256)", false)
+}
+
+func TestCustomErrors(t *testing.T) {
+	t.Parallel()
+	json := `[{ "inputs": [	{ "internalType": "uint256", "name": "", "type": "uint256" } ],"name": "MyError", "type": "error"} ]`
+	abi, err := JSON(strings.NewReader(json))
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(name string, expect string) {
+		if abi.Errors[name].Sig != expect {
+			t.Fatalf("The signature of overloaded method mismatch, want %s, have %s", expect, abi.Methods[name].Sig)
+		}
+	}
+	check("MyError", "MyError(uint256)")
+}
+
+func TestMultiPack(t *testing.T) {
+	t.Parallel()
+	abi, err := JSON(strings.NewReader(jsondata))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sig := crypto.Keccak256([]byte("bar(uint32,uint16)"))[:4]
+	// Two 64-byte ABI slots after the 4-byte selector.
+	sig = append(sig, make([]byte, 128)...)
+	sig[4+63] = 10  // uint32(10) — low byte of first slot
+	sig[4+127] = 11 // uint16(11) — low byte of second slot
+
+	packed, err := abi.Pack("bar", uint32(10), uint16(11))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(packed, sig) {
+		t.Errorf("expected %x got %x", sig, packed)
+	}
+}
+
+func ExampleJSON() {
+	const definition = `[{"constant":true,"inputs":[{"name":"","type":"address"}],"name":"isBar","outputs":[{"name":"","type":"bool"}],"type":"function"}]`
+
+	abi, err := JSON(strings.NewReader(definition))
+	if err != nil {
+		panic(err)
+	}
+	address, _ := common.NewAddressFromString("Q" + strings.Repeat("0", 126) + "01")
+	out, err := abi.Pack("isBar", address)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("%x\n", out)
+	// Output:
+	// 1f2c409200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001
+}
+
+// abiSlotSize is the width of a single ABI slot after the 64-byte-address /
+// 512-bit VM migration.
+const abiSlotSize = 64
+
+// abiSlot returns a zero-padded big-endian encoding of v in a single ABI slot.
+func abiSlot(v uint64) []byte {
+	var b [abiSlotSize]byte
+	binary.BigEndian.PutUint64(b[abiSlotSize-8:], v)
+	return b[:]
+}
+
+// abiStringData returns the encoded tail for a dynamic string/bytes value:
+// a length slot followed by the bytes right-padded to a multiple of the slot
+// size.
+func abiStringData(data []byte) []byte {
+	out := abiSlot(uint64(len(data)))
+	padded := len(data)
+	if rem := padded % abiSlotSize; rem != 0 {
+		padded += abiSlotSize - rem
+	}
+	tail := make([]byte, padded)
+	copy(tail, data)
+	return append(out, tail...)
+}
+
+func TestInputVariableInputLength(t *testing.T) {
+	t.Parallel()
+	const definition = `[
+	{ "type" : "function", "name" : "strOne", "constant" : true, "inputs" : [ { "name" : "str", "type" : "string" } ] },
+	{ "type" : "function", "name" : "bytesOne", "constant" : true, "inputs" : [ { "name" : "str", "type" : "bytes" } ] },
+	{ "type" : "function", "name" : "strTwo", "constant" : true, "inputs" : [ { "name" : "str", "type" : "string" }, { "name" : "str1", "type" : "string" } ] }
+	]`
+
+	abi, err := JSON(strings.NewReader(definition))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// test one string
+	strin := "hello world"
+	strpack, err := abi.Pack("strOne", strin)
+	if err != nil {
+		t.Error(err)
+	}
+	// Offset to data = 1 head slot.
+	exp := abiSlot(abiSlotSize)
+	exp = append(exp, abiStringData([]byte(strin))...)
+	strpack = strpack[4:]
+	if !bytes.Equal(strpack, exp) {
+		t.Errorf("expected %x, got %x\n", exp, strpack)
+	}
+
+	// test one bytes
+	btspack, err := abi.Pack("bytesOne", []byte(strin))
+	if err != nil {
+		t.Error(err)
+	}
+	btspack = btspack[4:]
+	if !bytes.Equal(btspack, exp) {
+		t.Errorf("expected %x, got %x\n", exp, btspack)
+	}
+
+	// test two strings (both fit in one slot's worth of data).
+	str1 := "hello"
+	str2 := "world"
+	str2pack, err := abi.Pack("strTwo", str1, str2)
+	if err != nil {
+		t.Error(err)
+	}
+	// Head is 2 offset slots = 2*64. Str1's tail is 2 slots (length + 1 data).
+	exp2 := abiSlot(2 * abiSlotSize)               // offset1
+	exp2 = append(exp2, abiSlot(4*abiSlotSize)...) // offset2 = head(2) + tail1(2)
+	exp2 = append(exp2, abiStringData([]byte(str1))...)
+	exp2 = append(exp2, abiStringData([]byte(str2))...)
+	str2pack = str2pack[4:]
+	if !bytes.Equal(str2pack, exp2) {
+		t.Errorf("expected %x, got %x\n", exp2, str2pack)
+	}
+
+	// test two strings, first > slot size, second < slot size
+	str1 = strings.Repeat("a", abiSlotSize+1)
+	str2pack, err = abi.Pack("strTwo", str1, str2)
+	if err != nil {
+		t.Error(err)
+	}
+	// Str1 tail = 1 length + ceil((64+1)/64)=2 data slots = 3 slots.
+	exp2 = abiSlot(2 * abiSlotSize)
+	exp2 = append(exp2, abiSlot(5*abiSlotSize)...) // head(2) + tail1(3)
+	exp2 = append(exp2, abiStringData([]byte(str1))...)
+	exp2 = append(exp2, abiStringData([]byte(str2))...)
+	str2pack = str2pack[4:]
+	if !bytes.Equal(str2pack, exp2) {
+		t.Errorf("expected %x, got %x\n", exp2, str2pack)
+	}
+
+	// test two strings, both > slot size
+	str1 = strings.Repeat("a", abiSlotSize+1)
+	str2 = strings.Repeat("a", abiSlotSize+1)
+	str2pack, err = abi.Pack("strTwo", str1, str2)
+	if err != nil {
+		t.Error(err)
+	}
+	exp2 = abiSlot(2 * abiSlotSize)
+	exp2 = append(exp2, abiSlot(5*abiSlotSize)...)
+	exp2 = append(exp2, abiStringData([]byte(str1))...)
+	exp2 = append(exp2, abiStringData([]byte(str2))...)
+	str2pack = str2pack[4:]
+	if !bytes.Equal(str2pack, exp2) {
+		t.Errorf("expected %x, got %x\n", exp2, str2pack)
+	}
+}
+
+func TestInputFixedArrayAndVariableInputLength(t *testing.T) {
+	t.Parallel()
+	abi, err := JSON(strings.NewReader(jsondata))
+	if err != nil {
+		t.Error(err)
+	}
+
+	leftPad := func(v *big.Int) []byte { return common.LeftPadBytes(v.Bytes(), abiSlotSize) }
+
+	// test string, fixed array uint256[2]
+	strin := "hello world"
+	arrin := [2]*big.Int{big.NewInt(1), big.NewInt(2)}
+	fixedArrStrPack, err := abi.Pack("fixedArrStr", strin, arrin)
+	if err != nil {
+		t.Error(err)
+	}
+	// Head: string offset (slot 0) + arr[0] + arr[1]. String lives after 3 head
+	// slots at byte 3*64 = 192.
+	exp := abiSlot(3 * abiSlotSize)
+	exp = append(exp, leftPad(arrin[0])...)
+	exp = append(exp, leftPad(arrin[1])...)
+	exp = append(exp, abiStringData([]byte(strin))...)
+	fixedArrStrPack = fixedArrStrPack[4:]
+	if !bytes.Equal(fixedArrStrPack, exp) {
+		t.Errorf("expected %x, got %x\n", exp, fixedArrStrPack)
+	}
+
+	// test byte array, fixed array uint256[2] — same encoding shape.
+	bytesin := []byte(strin)
+	arrin = [2]*big.Int{big.NewInt(1), big.NewInt(2)}
+	fixedArrBytesPack, err := abi.Pack("fixedArrBytes", bytesin, arrin)
+	if err != nil {
+		t.Error(err)
+	}
+	fixedArrBytesPack = fixedArrBytesPack[4:]
+	if !bytes.Equal(fixedArrBytesPack, exp) {
+		t.Errorf("expected %x, got %x\n", exp, fixedArrBytesPack)
+	}
+
+	// test string, fixed array uint256[2], dynamic array uint256[]
+	strin = "hello world"
+	fixedarrin := [2]*big.Int{big.NewInt(1), big.NewInt(2)}
+	dynarrin := []*big.Int{big.NewInt(1), big.NewInt(2), big.NewInt(3)}
+	mixedArrStrPack, err := abi.Pack("mixedArrStr", strin, fixedarrin, dynarrin)
+	if err != nil {
+		t.Error(err)
+	}
+	// Head: 1 str offset + 2 fixed arr + 1 dyn offset = 4 slots.
+	headSlots := uint64(4)
+	strTailSlots := uint64(1 + (len(strin)+abiSlotSize-1)/abiSlotSize) // length + data
+	stroffset := abiSlot(headSlots * abiSlotSize)
+	dynoffset := abiSlot((headSlots + strTailSlots) * abiSlotSize)
+	exp = append([]byte{}, stroffset...)
+	exp = append(exp, leftPad(fixedarrin[0])...)
+	exp = append(exp, leftPad(fixedarrin[1])...)
+	exp = append(exp, dynoffset...)
+	exp = append(exp, abiStringData([]byte(strin))...)
+	exp = append(exp, abiSlot(uint64(len(dynarrin)))...)
+	for _, v := range dynarrin {
+		exp = append(exp, leftPad(v)...)
+	}
+	mixedArrStrPack = mixedArrStrPack[4:]
+	if !bytes.Equal(mixedArrStrPack, exp) {
+		t.Errorf("expected %x, got %x\n", exp, mixedArrStrPack)
+	}
+
+	// test string, fixed array uint256[2], fixed array uint256[3]
+	strin = "hello world"
+	fixedarrin1 := [2]*big.Int{big.NewInt(1), big.NewInt(2)}
+	fixedarrin2 := [3]*big.Int{big.NewInt(1), big.NewInt(2), big.NewInt(3)}
+	doubleFixedArrStrPack, err := abi.Pack("doubleFixedArrStr", strin, fixedarrin1, fixedarrin2)
+	if err != nil {
+		t.Error(err)
+	}
+	// Head: 1 str offset + 2 fixed arr1 + 3 fixed arr2 = 6 slots.
+	exp = abiSlot(6 * abiSlotSize)
+	exp = append(exp, leftPad(fixedarrin1[0])...)
+	exp = append(exp, leftPad(fixedarrin1[1])...)
+	exp = append(exp, leftPad(fixedarrin2[0])...)
+	exp = append(exp, leftPad(fixedarrin2[1])...)
+	exp = append(exp, leftPad(fixedarrin2[2])...)
+	exp = append(exp, abiStringData([]byte(strin))...)
+	doubleFixedArrStrPack = doubleFixedArrStrPack[4:]
+	if !bytes.Equal(doubleFixedArrStrPack, exp) {
+		t.Errorf("expected %x, got %x\n", exp, doubleFixedArrStrPack)
+	}
+
+	// test string, fixed array uint256[2], dynamic array uint256[], fixed array uint256[3]
+	strin = "hello world"
+	fixedarrin1 = [2]*big.Int{big.NewInt(1), big.NewInt(2)}
+	dynarrin = []*big.Int{big.NewInt(1), big.NewInt(2)}
+	fixedarrin2 = [3]*big.Int{big.NewInt(1), big.NewInt(2), big.NewInt(3)}
+	multipleMixedArrStrPack, err := abi.Pack("multipleMixedArrStr", strin, fixedarrin1, dynarrin, fixedarrin2)
+	if err != nil {
+		t.Error(err)
+	}
+	// Head: 1 str offset + 2 fixed arr1 + 1 dyn offset + 3 fixed arr2 = 7 slots.
+	headSlots = 7
+	strTailSlots = uint64(1 + (len(strin)+abiSlotSize-1)/abiSlotSize)
+	stroffset = abiSlot(headSlots * abiSlotSize)
+	dynoffset = abiSlot((headSlots + strTailSlots) * abiSlotSize)
+	exp = append([]byte{}, stroffset...)
+	exp = append(exp, leftPad(fixedarrin1[0])...)
+	exp = append(exp, leftPad(fixedarrin1[1])...)
+	exp = append(exp, dynoffset...)
+	exp = append(exp, leftPad(fixedarrin2[0])...)
+	exp = append(exp, leftPad(fixedarrin2[1])...)
+	exp = append(exp, leftPad(fixedarrin2[2])...)
+	exp = append(exp, abiStringData([]byte(strin))...)
+	exp = append(exp, abiSlot(uint64(len(dynarrin)))...)
+	for _, v := range dynarrin {
+		exp = append(exp, leftPad(v)...)
+	}
+	multipleMixedArrStrPack = multipleMixedArrStrPack[4:]
+	if !bytes.Equal(multipleMixedArrStrPack, exp) {
+		t.Errorf("expected %x, got %x\n", exp, multipleMixedArrStrPack)
+	}
+}
+
+func TestDefaultFunctionParsing(t *testing.T) {
+	t.Parallel()
+	const definition = `[{ "name" : "balance", "type" : "function" }]`
+
+	abi, err := JSON(strings.NewReader(definition))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := abi.Methods["balance"]; !ok {
+		t.Error("expected 'balance' to be present")
+	}
+}
+
+func TestBareEvents(t *testing.T) {
+	t.Parallel()
+	const definition = `[
+	{ "type" : "event", "name" : "balance" },
+	{ "type" : "event", "name" : "anon", "anonymous" : true},
+	{ "type" : "event", "name" : "args", "inputs" : [{ "indexed":false, "name":"arg0", "type":"uint256" }, { "indexed":true, "name":"arg1", "type":"address" }] },
+	{ "type" : "event", "name" : "tuple", "inputs" : [{ "indexed":false, "name":"t", "type":"tuple", "components":[{"name":"a", "type":"uint256"}] }, { "indexed":true, "name":"arg1", "type":"address" }] }
+	]`
+
+	tuple, _ := NewType("tuple", "", []ArgumentMarshaling{{Name: "a", Type: "uint256"}})
+
+	expectedEvents := map[string]struct {
+		Anonymous bool
+		Args      []Argument
+	}{
+		"balance": {false, nil},
+		"anon":    {true, nil},
+		"args": {false, []Argument{
+			{Name: "arg0", Type: Uint256, Indexed: false},
+			{Name: "arg1", Type: Address, Indexed: true},
+		}},
+		"tuple": {false, []Argument{
+			{Name: "t", Type: tuple, Indexed: false},
+			{Name: "arg1", Type: Address, Indexed: true},
+		}},
+	}
+
+	abi, err := JSON(strings.NewReader(definition))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(abi.Events) != len(expectedEvents) {
+		t.Fatalf("invalid number of events after parsing, want %d, got %d", len(expectedEvents), len(abi.Events))
+	}
+
+	for name, exp := range expectedEvents {
+		got, ok := abi.Events[name]
+		if !ok {
+			t.Errorf("could not found event %s", name)
+			continue
+		}
+		if got.Anonymous != exp.Anonymous {
+			t.Errorf("invalid anonymous indication for event %s, want %v, got %v", name, exp.Anonymous, got.Anonymous)
+		}
+		if len(got.Inputs) != len(exp.Args) {
+			t.Errorf("invalid number of args, want %d, got %d", len(exp.Args), len(got.Inputs))
+			continue
+		}
+		for i, arg := range exp.Args {
+			if arg.Name != got.Inputs[i].Name {
+				t.Errorf("events[%s].Input[%d] has an invalid name, want %s, got %s", name, i, arg.Name, got.Inputs[i].Name)
+			}
+			if arg.Indexed != got.Inputs[i].Indexed {
+				t.Errorf("events[%s].Input[%d] has an invalid indexed indication, want %v, got %v", name, i, arg.Indexed, got.Inputs[i].Indexed)
+			}
+			if arg.Type.T != got.Inputs[i].Type.T {
+				t.Errorf("events[%s].Input[%d] has an invalid type, want %x, got %x", name, i, arg.Type.T, got.Inputs[i].Type.T)
+			}
+		}
+	}
+}
+
+// TestUnpackEvent is based on this contract:
+//
+//	contract T {
+//		event received(address sender, uint amount, bytes memo);
+//		event receivedAddr(address sender);
+//		function receive(bytes memo) external payable {
+//			received(msg.sender, msg.value, memo);
+//			receivedAddr(msg.sender);
+//		}
+//	}
+//
+// When receive("X") is called with sender Q00... and value 1, it produces this tx receipt:
+//
+//	receipt{status=1 cgas=23949 bloom=00000000004000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000040200000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 logs=[log: b6818c8064f645cd82d99b59a1a267d6d61117ef [75fd880d39c1daf53b6547ab6cb59451fc6452d27caa90e5b6649dd8293b9eed] 000000000000000000000000376c47978271565f56deb45495afa69e59c16ab200000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000060000000000000000000000000000000000000000000000000000000000000000158 9ae378b6d4409eada347a5dc0c180f186cb62dc68fcc0f043425eb917335aa28 0 95d429d309bb9d753954195fe2d69bd140b4ae731b9b5b605c34323de162cf00 0]}
+func TestUnpackEvent(t *testing.T) {
+	t.Parallel()
+	const abiJSON = `[{"constant":false,"inputs":[{"name":"memo","type":"bytes"}],"name":"receive","outputs":[],"payable":true,"stateMutability":"payable","type":"function"},{"anonymous":false,"inputs":[{"indexed":false,"name":"sender","type":"address"},{"indexed":false,"name":"amount","type":"uint256"},{"indexed":false,"name":"memo","type":"bytes"}],"name":"received","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"name":"sender","type":"address"}],"name":"receivedAddr","type":"event"}]`
+	abi, err := JSON(strings.NewReader(abiJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Use a parallel input method with the same argument shape to produce the
+	// event data bytes deterministically against the current ABI slot width.
+	const inJSON = `[{"name":"received","type":"function","inputs":[{"name":"sender","type":"address"},{"name":"amount","type":"uint256"},{"name":"memo","type":"bytes"}]},{"name":"receivedAddr","type":"function","inputs":[{"name":"sender","type":"address"}]}]`
+	inAbi, err := JSON(strings.NewReader(inJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender, _ := common.NewAddressFromString("Q0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000376c47978271565f56DEB45495afa69E59c16Ab2")
+	amount := big.NewInt(1)
+	memo := []byte{0x58}
+	packed, err := inAbi.Pack("received", sender, amount, memo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := packed[4:]
+
+	type ReceivedEvent struct {
+		Sender common.Address
+		Amount *big.Int
+		Memo   []byte
+	}
+	var ev ReceivedEvent
+	if err := abi.UnpackIntoInterface(&ev, "received", data); err != nil {
+		t.Error(err)
+	}
+	if ev.Sender != sender {
+		t.Errorf("sender: got %v want %v", ev.Sender, sender)
+	}
+	if ev.Amount.Cmp(amount) != 0 {
+		t.Errorf("amount: got %s want %s", ev.Amount, amount)
+	}
+	if !bytes.Equal(ev.Memo, memo) {
+		t.Errorf("memo: got %x want %x", ev.Memo, memo)
+	}
+
+	packedAddr, err := inAbi.Pack("receivedAddr", sender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type ReceivedAddrEvent struct {
+		Sender common.Address
+	}
+	var receivedAddrEv ReceivedAddrEvent
+	if err := abi.UnpackIntoInterface(&receivedAddrEv, "receivedAddr", packedAddr[4:]); err != nil {
+		t.Error(err)
+	}
+	if receivedAddrEv.Sender != sender {
+		t.Errorf("receivedAddr sender: got %v want %v", receivedAddrEv.Sender, sender)
+	}
+}
+
+func TestUnpackEventIntoMap(t *testing.T) {
+	t.Parallel()
+	const abiJSON = `[{"constant":false,"inputs":[{"name":"memo","type":"bytes"}],"name":"receive","outputs":[],"payable":true,"stateMutability":"payable","type":"function"},{"anonymous":false,"inputs":[{"indexed":false,"name":"sender","type":"address"},{"indexed":false,"name":"amount","type":"uint256"},{"indexed":false,"name":"memo","type":"bytes"}],"name":"received","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"name":"sender","type":"address"}],"name":"receivedAddr","type":"event"}]`
+	abi, err := JSON(strings.NewReader(abiJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const inJSON = `[{"name":"received","type":"function","inputs":[{"name":"sender","type":"address"},{"name":"amount","type":"uint256"},{"name":"memo","type":"bytes"}]},{"name":"receivedAddr","type":"function","inputs":[{"name":"sender","type":"address"}]}]`
+	inAbi, err := JSON(strings.NewReader(inJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender, _ := common.NewAddressFromString("Q0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000376c47978271565f56DEB45495afa69E59c16Ab2")
+	amount := big.NewInt(1)
+	memo := []byte{0x58}
+	packed, err := inAbi.Pack("received", sender, amount, memo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := packed[4:]
+
+	expectedReceivedMap := map[string]any{
+		"sender": sender,
+		"amount": amount,
+		"memo":   memo,
+	}
+	receivedMap := map[string]any{}
+	if err := abi.UnpackIntoMap(receivedMap, "received", data); err != nil {
+		t.Error(err)
+	}
+	if len(receivedMap) != 3 {
+		t.Error("unpacked `received` map expected to have length 3")
+	}
+	if receivedMap["sender"] != expectedReceivedMap["sender"] {
+		t.Error("unpacked `received` map does not match expected map")
+	}
+	if receivedMap["amount"].(*big.Int).Cmp(expectedReceivedMap["amount"].(*big.Int)) != 0 {
+		t.Error("unpacked `received` map does not match expected map")
+	}
+	if !bytes.Equal(receivedMap["memo"].([]byte), expectedReceivedMap["memo"].([]byte)) {
+		t.Error("unpacked `received` map does not match expected map")
+	}
+
+	packedAddr, err := inAbi.Pack("receivedAddr", sender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receivedAddrMap := map[string]any{}
+	if err = abi.UnpackIntoMap(receivedAddrMap, "receivedAddr", packedAddr[4:]); err != nil {
+		t.Error(err)
+	}
+	if len(receivedAddrMap) != 1 {
+		t.Error("unpacked `receivedAddr` map expected to have length 1")
+	}
+	if receivedAddrMap["sender"] != expectedReceivedMap["sender"] {
+		t.Error("unpacked `receivedAddr` map does not match expected map")
+	}
+}
+
+func TestUnpackMethodIntoMap(t *testing.T) {
+	t.Parallel()
+	const abiJSON = `[{"constant":false,"inputs":[{"name":"memo","type":"bytes"}],"name":"receive","outputs":[],"payable":true,"stateMutability":"payable","type":"function"},{"constant":false,"inputs":[],"name":"send","outputs":[{"name":"amount","type":"uint256"}],"payable":true,"stateMutability":"payable","type":"function"},{"constant":false,"inputs":[{"name":"addr","type":"address"}],"name":"get","outputs":[{"name":"hash","type":"bytes"}],"payable":true,"stateMutability":"payable","type":"function"}]`
+	abi, err := JSON(strings.NewReader(abiJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The source data is a concatenation of return payloads for three separate
+	// calls (`send`, `get` etc.). Produce each payload via the packer to keep
+	// the expected values and slot width consistent.
+	const inJSON = `[{"name":"send","type":"function","inputs":[{"name":"amount","type":"uint256"}]},{"name":"get","type":"function","inputs":[{"name":"hash","type":"bytes"}]}]`
+	inAbi, err := JSON(strings.NewReader(inJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sendPacked, err := inAbi.Pack("send", big.NewInt(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashVal := []byte{0x58}
+	getPacked, err := inAbi.Pack("get", hashVal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Tests a method with no outputs; the concrete data bytes don't matter.
+	data := append(append([]byte{}, sendPacked[4:]...), getPacked[4:]...)
+
+	receiveMap := map[string]any{}
+	if err = abi.UnpackIntoMap(receiveMap, "receive", data); err != nil {
+		t.Error(err)
+	}
+	if len(receiveMap) > 0 {
+		t.Error("unpacked `receive` map expected to have length 0")
+	}
+
+	// Tests a method with only outputs — feed just the send return payload.
+	sendMap := map[string]any{}
+	if err = abi.UnpackIntoMap(sendMap, "send", sendPacked[4:]); err != nil {
+		t.Error(err)
+	}
+	if len(sendMap) != 1 {
+		t.Error("unpacked `send` map expected to have length 1")
+	}
+	if sendMap["amount"].(*big.Int).Cmp(big.NewInt(1)) != 0 {
+		t.Error("unpacked `send` map expected `amount` value of 1")
+	}
+
+	// Tests a method with outputs and inputs — `get` return payload is a single
+	// bytes output.
+	getMap := map[string]any{}
+	if err = abi.UnpackIntoMap(getMap, "get", getPacked[4:]); err != nil {
+		t.Error(err)
+	}
+	if len(getMap) != 1 {
+		t.Error("unpacked `get` map expected to have length 1")
+	}
+	if !bytes.Equal(getMap["hash"].([]byte), hashVal) {
+		t.Errorf("unpacked `get` map expected `hash` value of %x, got %x", hashVal, getMap["hash"])
+	}
+}
+
+func TestUnpackIntoMapNamingConflict(t *testing.T) {
+	t.Parallel()
+
+	// A shared (sender,amount,memo) payload for cases that care about the
+	// concrete bytes — regenerated against the live slot width.
+	const inJSON = `[{"name":"payload","type":"function","inputs":[{"name":"sender","type":"address"},{"name":"amount","type":"uint256"},{"name":"memo","type":"bytes"}]}]`
+	inAbi, err := JSON(strings.NewReader(inJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender, _ := common.NewAddressFromString("Q0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000376c47978271565f56DEB45495afa69E59c16Ab2")
+	memo := []byte{0x58}
+	packed, err := inAbi.Pack("payload", sender, big.NewInt(1), memo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := packed[4:]
+	expectedReceivedMap := map[string]any{
+		"sender": sender,
+		"amount": big.NewInt(1),
+		"memo":   memo,
+	}
+
+	// Short payload used by cases that expect a non-nil error: the length
+	// has to pass the name lookup but fail the slot-multiple check.
+	malformed := make([]byte, 96)
+
+	// Two methods have the same name → lookup must fail.
+	var abiJSON = `[{"constant":false,"inputs":[{"name":"memo","type":"bytes"}],"name":"get","outputs":[],"payable":true,"stateMutability":"payable","type":"function"},{"constant":false,"inputs":[],"name":"send","outputs":[{"name":"amount","type":"uint256"}],"payable":true,"stateMutability":"payable","type":"function"},{"constant":false,"inputs":[{"name":"addr","type":"address"}],"name":"get","outputs":[{"name":"hash","type":"bytes"}],"payable":true,"stateMutability":"payable","type":"function"}]`
+	abi, err := JSON(strings.NewReader(abiJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	getMap := map[string]any{}
+	if err = abi.UnpackIntoMap(getMap, "get", malformed); err == nil {
+		t.Error("naming conflict between two methods; error expected")
+	}
+
+	// Two events have the same name → first one wins, unpack OK.
+	abiJSON = `[{"constant":false,"inputs":[{"name":"memo","type":"bytes"}],"name":"receive","outputs":[],"payable":true,"stateMutability":"payable","type":"function"},{"anonymous":false,"inputs":[{"indexed":false,"name":"sender","type":"address"},{"indexed":false,"name":"amount","type":"uint256"},{"indexed":false,"name":"memo","type":"bytes"}],"name":"received","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"name":"sender","type":"address"}],"name":"received","type":"event"}]`
+	abi, err = JSON(strings.NewReader(abiJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receivedMap := map[string]any{}
+	if err = abi.UnpackIntoMap(receivedMap, "received", payload); err != nil {
+		t.Error("naming conflict between two events; no error expected")
+	}
+
+	// Method and event have the same name → lookup must fail.
+	abiJSON = `[{"constant":false,"inputs":[{"name":"memo","type":"bytes"}],"name":"received","outputs":[],"payable":true,"stateMutability":"payable","type":"function"},{"anonymous":false,"inputs":[{"indexed":false,"name":"sender","type":"address"},{"indexed":false,"name":"amount","type":"uint256"},{"indexed":false,"name":"memo","type":"bytes"}],"name":"received","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"name":"sender","type":"address"}],"name":"receivedAddr","type":"event"}]`
+	abi, err = JSON(strings.NewReader(abiJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = abi.UnpackIntoMap(receivedMap, "received", malformed); err == nil {
+		t.Error("naming conflict between an event and a method; error expected")
+	}
+
+	// Case-sensitive — `Received` is a distinct event; unpack succeeds.
+	abiJSON = `[{"constant":false,"inputs":[{"name":"memo","type":"bytes"}],"name":"received","outputs":[],"payable":true,"stateMutability":"payable","type":"function"},{"anonymous":false,"inputs":[{"indexed":false,"name":"sender","type":"address"},{"indexed":false,"name":"amount","type":"uint256"},{"indexed":false,"name":"memo","type":"bytes"}],"name":"Received","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"name":"sender","type":"address"}],"name":"receivedAddr","type":"event"}]`
+	abi, err = JSON(strings.NewReader(abiJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = abi.UnpackIntoMap(receivedMap, "Received", payload); err != nil {
+		t.Error(err)
+	}
+	if len(receivedMap) != 3 {
+		t.Error("unpacked `received` map expected to have length 3")
+	}
+	if receivedMap["sender"] != expectedReceivedMap["sender"] {
+		t.Error("unpacked `received` map does not match expected map")
+	}
+	if receivedMap["amount"].(*big.Int).Cmp(expectedReceivedMap["amount"].(*big.Int)) != 0 {
+		t.Error("unpacked `received` map does not match expected map")
+	}
+	if !bytes.Equal(receivedMap["memo"].([]byte), expectedReceivedMap["memo"].([]byte)) {
+		t.Error("unpacked `received` map does not match expected map")
+	}
+}
+
+func TestABI_MethodById(t *testing.T) {
+	t.Parallel()
+	abi, err := JSON(strings.NewReader(jsondata))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, m := range abi.Methods {
+		a := fmt.Sprintf("%v", m)
+		m2, err := abi.MethodById(m.ID)
+		if err != nil {
+			t.Fatalf("Failed to look up ABI method: %v", err)
+		}
+		b := fmt.Sprintf("%v", m2)
+		if a != b {
+			t.Errorf("Method %v (id %x) not 'findable' by id in ABI", name, m.ID)
+		}
+	}
+	// test unsuccessful lookups
+	if _, err = abi.MethodById(crypto.Keccak256()); err == nil {
+		t.Error("Expected error: no method with this id")
+	}
+	// Also test empty
+	if _, err := abi.MethodById([]byte{0x00}); err == nil {
+		t.Errorf("Expected error, too short to decode data")
+	}
+	if _, err := abi.MethodById([]byte{}); err == nil {
+		t.Errorf("Expected error, too short to decode data")
+	}
+	if _, err := abi.MethodById(nil); err == nil {
+		t.Errorf("Expected error, nil is short to decode data")
+	}
+}
+
+func TestABI_EventById(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		json  string
+		event string
+	}{
+		{
+			name: "",
+			json: `[
+			{"type":"event","name":"received","anonymous":false,"inputs":[
+				{"indexed":false,"name":"sender","type":"address"},
+				{"indexed":false,"name":"amount","type":"uint256"},
+				{"indexed":false,"name":"memo","type":"bytes"}
+				]
+			}]`,
+			event: "received(address,uint256,bytes)",
+		}, {
+			name: "",
+			json: `[
+				{ "constant": true, "inputs": [], "name": "name", "outputs": [ { "name": "", "type": "string" } ], "payable": false, "stateMutability": "view", "type": "function" },
+				{ "constant": false, "inputs": [ { "name": "_spender", "type": "address" }, { "name": "_value", "type": "uint256" } ], "name": "approve", "outputs": [ { "name": "", "type": "bool" } ], "payable": false, "stateMutability": "nonpayable", "type": "function" },
+				{ "constant": true, "inputs": [], "name": "totalSupply", "outputs": [ { "name": "", "type": "uint256" } ], "payable": false, "stateMutability": "view", "type": "function" },
+				{ "constant": false, "inputs": [ { "name": "_from", "type": "address" }, { "name": "_to", "type": "address" }, { "name": "_value", "type": "uint256" } ], "name": "transferFrom", "outputs": [ { "name": "", "type": "bool" } ], "payable": false, "stateMutability": "nonpayable", "type": "function" },
+				{ "constant": true, "inputs": [], "name": "decimals", "outputs": [ { "name": "", "type": "uint8" } ], "payable": false, "stateMutability": "view", "type": "function" },
+				{ "constant": true, "inputs": [ { "name": "_owner", "type": "address" } ], "name": "balanceOf", "outputs": [ { "name": "balance", "type": "uint256" } ], "payable": false, "stateMutability": "view", "type": "function" },
+				{ "constant": true, "inputs": [], "name": "symbol", "outputs": [ { "name": "", "type": "string" } ], "payable": false, "stateMutability": "view", "type": "function" },
+				{ "constant": false, "inputs": [ { "name": "_to", "type": "address" }, { "name": "_value", "type": "uint256" } ], "name": "transfer", "outputs": [ { "name": "", "type": "bool" } ], "payable": false, "stateMutability": "nonpayable", "type": "function" },
+				{ "constant": true, "inputs": [ { "name": "_owner", "type": "address" }, { "name": "_spender", "type": "address" } ], "name": "allowance", "outputs": [ { "name": "", "type": "uint256" } ], "payable": false, "stateMutability": "view", "type": "function" },
+				{ "payable": true, "stateMutability": "payable", "type": "fallback" },
+				{ "anonymous": false, "inputs": [ { "indexed": true, "name": "owner", "type": "address" }, { "indexed": true, "name": "spender", "type": "address" }, { "indexed": false, "name": "value", "type": "uint256" } ], "name": "Approval", "type": "event" },
+				{ "anonymous": false, "inputs": [ { "indexed": true, "name": "from", "type": "address" }, { "indexed": true, "name": "to", "type": "address" }, { "indexed": false, "name": "value", "type": "uint256" } ], "name": "Transfer", "type": "event" }
+			]`,
+			event: "Transfer(address,address,uint256)",
+		},
+	}
+
+	for testnum, test := range tests {
+		abi, err := JSON(strings.NewReader(test.json))
+		if err != nil {
+			t.Error(err)
+		}
+
+		topic := test.event
+		topicID := crypto.Keccak256Hash([]byte(topic))
+
+		event, err := abi.EventByID(topicID)
+		if err != nil {
+			t.Fatalf("Failed to look up ABI method: %v, test #%d", err, testnum)
+		}
+		if event == nil {
+			t.Errorf("We should find a event for topic %s, test #%d", topicID.Hex(), testnum)
+		} else if event.ID != topicID {
+			t.Errorf("Event id %s does not match topic %s, test #%d", event.ID.Hex(), topicID.Hex(), testnum)
+		}
+
+		unknowntopicID := crypto.Keccak256Hash([]byte("unknownEvent"))
+		unknownEvent, err := abi.EventByID(unknowntopicID)
+		if err == nil {
+			t.Errorf("EventByID should return an error if a topic is not found, test #%d", testnum)
+		}
+		if unknownEvent != nil {
+			t.Errorf("We should not find any event for topic %s, test #%d", unknowntopicID.Hex(), testnum)
+		}
+	}
+}
+
+func TestABI_ErrorByID(t *testing.T) {
+	t.Parallel()
+	abi, err := JSON(strings.NewReader(`[
+		{"inputs":[{"internalType":"uint256","name":"x","type":"uint256"}],"name":"MyError1","type":"error"},
+		{"inputs":[{"components":[{"internalType":"uint256","name":"a","type":"uint256"},{"internalType":"string","name":"b","type":"string"},{"internalType":"address","name":"c","type":"address"}],"internalType":"struct MyError.MyStruct","name":"x","type":"tuple"},{"internalType":"address","name":"y","type":"address"},{"components":[{"internalType":"uint256","name":"a","type":"uint256"},{"internalType":"string","name":"b","type":"string"},{"internalType":"address","name":"c","type":"address"}],"internalType":"struct MyError.MyStruct","name":"z","type":"tuple"}],"name":"MyError2","type":"error"},
+		{"inputs":[{"internalType":"uint256[]","name":"x","type":"uint256[]"}],"name":"MyError3","type":"error"}
+	]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, m := range abi.Errors {
+		a := fmt.Sprintf("%v", &m)
+		var id [4]byte
+		copy(id[:], m.ID[:4])
+		m2, err := abi.ErrorByID(id)
+		if err != nil {
+			t.Fatalf("Failed to look up ABI error: %v", err)
+		}
+		b := fmt.Sprintf("%v", m2)
+		if a != b {
+			t.Errorf("Error %v (id %x) not 'findable' by id in ABI", name, id)
+		}
+	}
+	// test unsuccessful lookups
+	if _, err = abi.ErrorByID([4]byte{}); err == nil {
+		t.Error("Expected error: no error with this id")
+	}
+}
+
+// TestDoubleDuplicateMethodNames checks that if transfer0 already exists, there won't be a name
+// conflict and that the second transfer method will be renamed transfer1.
+func TestDoubleDuplicateMethodNames(t *testing.T) {
+	t.Parallel()
+	abiJSON := `[{"constant":false,"inputs":[{"name":"to","type":"address"},{"name":"value","type":"uint256"}],"name":"transfer","outputs":[{"name":"ok","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":false,"inputs":[{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"data","type":"bytes"}],"name":"transfer0","outputs":[{"name":"ok","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":false,"inputs":[{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"data","type":"bytes"},{"name":"customFallback","type":"string"}],"name":"transfer","outputs":[{"name":"ok","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"}]`
+	contractAbi, err := JSON(strings.NewReader(abiJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := contractAbi.Methods["transfer"]; !ok {
+		t.Fatalf("Could not find original method")
+	}
+	if _, ok := contractAbi.Methods["transfer0"]; !ok {
+		t.Fatalf("Could not find duplicate method")
+	}
+	if _, ok := contractAbi.Methods["transfer1"]; !ok {
+		t.Fatalf("Could not find duplicate method")
+	}
+	if _, ok := contractAbi.Methods["transfer2"]; ok {
+		t.Fatalf("Should not have found extra method")
+	}
+}
+
+// TestDoubleDuplicateEventNames checks that if send0 already exists, there won't be a name
+// conflict and that the second send event will be renamed send1.
+// The test runs the abi of the following contract.
+//
+//	contract DuplicateEvent {
+//		event send(uint256 a);
+//		event send0();
+//		event send();
+//	}
+func TestDoubleDuplicateEventNames(t *testing.T) {
+	t.Parallel()
+	abiJSON := `[{"anonymous": false,"inputs": [{"indexed": false,"internalType": "uint256","name": "a","type": "uint256"}],"name": "send","type": "event"},{"anonymous": false,"inputs": [],"name": "send0","type": "event"},{	"anonymous": false,	"inputs": [],"name": "send","type": "event"}]`
+	contractAbi, err := JSON(strings.NewReader(abiJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := contractAbi.Events["send"]; !ok {
+		t.Fatalf("Could not find original event")
+	}
+	if _, ok := contractAbi.Events["send0"]; !ok {
+		t.Fatalf("Could not find duplicate event")
+	}
+	if _, ok := contractAbi.Events["send1"]; !ok {
+		t.Fatalf("Could not find duplicate event")
+	}
+	if _, ok := contractAbi.Events["send2"]; ok {
+		t.Fatalf("Should not have found extra event")
+	}
+}
+
+// TestUnnamedEventParam checks that an event with unnamed parameters is
+// correctly handled.
+// The test runs the abi of the following contract.
+//
+//	contract TestEvent {
+//		event send(uint256, uint256);
+//	}
+func TestUnnamedEventParam(t *testing.T) {
+	t.Parallel()
+	abiJSON := `[{ "anonymous": false, "inputs": [{	"indexed": false,"internalType": "uint256",	"name": "","type": "uint256"},{"indexed": false,"internalType": "uint256","name": "","type": "uint256"}],"name": "send","type": "event"}]`
+	contractAbi, err := JSON(strings.NewReader(abiJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	event, ok := contractAbi.Events["send"]
+	if !ok {
+		t.Fatalf("Could not find event")
+	}
+	if event.Inputs[0].Name != "arg0" {
+		t.Fatalf("Could not find input")
+	}
+	if event.Inputs[1].Name != "arg1" {
+		t.Fatalf("Could not find input")
+	}
+}
+
+func TestUnpackRevert(t *testing.T) {
+	t.Parallel()
+
+	// Helper: encode revert payload for Error(string reason).
+	revert := func(reason string) []byte {
+		stringTy, err := NewType("string", "", nil)
+		if err != nil {
+			t.Fatalf("build string type: %v", err)
+		}
+		body, err := (Arguments{{Type: stringTy}}).Pack(reason)
+		if err != nil {
+			t.Fatalf("pack revert reason: %v", err)
+		}
+		return append(append([]byte{}, revertSelector...), body...)
+	}
+	// Helper: encode revert payload for Panic(uint256 code).
+	panicPayload := func(code *big.Int) []byte {
+		uintTy, err := NewType("uint256", "", nil)
+		if err != nil {
+			t.Fatalf("build uint256 type: %v", err)
+		}
+		body, err := (Arguments{{Type: uintTy}}).Pack(code)
+		if err != nil {
+			t.Fatalf("pack panic code: %v", err)
+		}
+		return append(append([]byte{}, panicSelector...), body...)
+	}
+
+	var cases = []struct {
+		input     []byte
+		expect    string
+		expectErr error
+	}{
+		{nil, "", errors.New("invalid data for unpacking")},
+		// Valid selector but empty body.
+		{common.Hex2Bytes("08c379a1"), "", errors.New("invalid data for unpacking")},
+		{revert("revert reason"), "revert reason", nil},
+		{panicPayload(big.NewInt(0)), "generic panic", nil},
+		{panicPayload(big.NewInt(0xff)), "unknown panic code: 0xff", nil},
+	}
+	for index, c := range cases {
+		t.Run(fmt.Sprintf("case %d", index), func(t *testing.T) {
+			t.Parallel()
+			got, err := UnpackRevert(c.input)
+			if c.expectErr != nil {
+				if err == nil {
+					t.Fatalf("Expected non-nil error")
+				}
+				if err.Error() != c.expectErr.Error() {
+					t.Fatalf("Expected error mismatch, want %v, got %v", c.expectErr, err)
+				}
+				return
+			}
+			if c.expect != got {
+				t.Fatalf("Output mismatch, want %v, got %v", c.expect, got)
+			}
+		})
+	}
+}
+
+func TestInternalContractType(t *testing.T) {
+	jsonData := `[{"inputs":[{"components":[{"internalType":"uint256","name":"dailyLimit","type":"uint256"},{"internalType":"uint256","name":"txLimit","type":"uint256"},{"internalType":"uint256","name":"accountDailyLimit","type":"uint256"},{"internalType":"uint256","name":"minAmount","type":"uint256"},{"internalType":"bool","name":"onlyWhitelisted","type":"bool"}],"internalType":"struct IMessagePassingBridge.BridgeLimits","name":"bridgeLimits","type":"tuple"},{"components":[{"internalType":"uint256","name":"lastTransferReset","type":"uint256"},{"internalType":"uint256","name":"bridged24Hours","type":"uint256"}],"internalType":"struct IMessagePassingBridge.AccountLimit","name":"accountDailyLimit","type":"tuple"},{"components":[{"internalType":"uint256","name":"lastTransferReset","type":"uint256"},{"internalType":"uint256","name":"bridged24Hours","type":"uint256"}],"internalType":"struct IMessagePassingBridge.BridgeDailyLimit","name":"bridgeDailyLimit","type":"tuple"},{"internalType":"contract INameService","name":"nameService","type":"INameService"},{"internalType":"bool","name":"isClosed","type":"bool"},{"internalType":"address","name":"from","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"canBridge","outputs":[{"internalType":"bool","name":"isWithinLimit","type":"bool"},{"internalType":"string","name":"error","type":"string"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"amount","type":"uint256"},{"internalType":"uint8","name":"decimals","type":"uint8"}],"name":"normalizeFrom18ToTokenDecimals","outputs":[{"internalType":"uint256","name":"normalized","type":"uint256"}],"stateMutability":"pure","type":"function"},{"inputs":[{"internalType":"uint256","name":"amount","type":"uint256"},{"internalType":"uint8","name":"decimals","type":"uint8"}],"name":"normalizeFromTokenTo18Decimals","outputs":[{"internalType":"uint256","name":"normalized","type":"uint256"}],"stateMutability":"pure","type":"function"}]`
+	if _, err := JSON(strings.NewReader(jsonData)); err != nil {
+		t.Fatal(err)
+	}
+}

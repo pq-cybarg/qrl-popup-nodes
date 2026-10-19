@@ -1,0 +1,49 @@
+# AppArmor overlay: pins each popup-node service to its enforce-mode
+# profile.
+#
+# Stacks on top of docker-compose.yaml + docker-compose.hardened.yaml +
+# docker-compose.seccomp.yaml. Needs those profiles installed on the
+# host (see docker/apparmor/README.md).
+#
+# Bring up:
+#   qrlenv run -- docker compose \
+#     -f docker/docker-compose.yaml \
+#     -f docker/docker-compose.hardened.yaml \
+#     -f docker/docker-compose.seccomp.yaml \
+#     -f docker/docker-compose.apparmor.yaml \
+#     up -d
+
+services:
+  gqrl-node1:
+    security_opt:
+      - apparmor=qrl-gqrl
+  gqrl-node2:
+    security_opt:
+      - apparmor=qrl-gqrl
+  gqrl-node3:
+    security_opt:
+      - apparmor=qrl-gqrl
+  gqrl-node4:
+    security_opt:
+      - apparmor=qrl-gqrl
+
+  beacon-node1:
+    security_opt:
+      - apparmor=qrl-beacon
+  beacon-node2:
+    security_opt:
+      - apparmor=qrl-beacon
+  beacon-node3:
+    security_opt:
+      - apparmor=qrl-beacon
+  beacon-node4:
+    security_opt:
+      - apparmor=qrl-beacon
+
+  validator:
+    security_opt:
+      - apparmor=qrl-validator
+
+  dashboard:
+    security_opt:
+      - apparmor=qrl-dashboard

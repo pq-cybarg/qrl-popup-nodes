@@ -1,0 +1,89 @@
+# Rootless-safe status-server (dashboard) image for popup nodes.
+#
+# Node.js app. No native modules → pure JS runtime, no compile stage.
+#
+# Build:
+#   docker build -f docker/popup-node/Dockerfile.status-server -t qrl-dashboard .
+#
+# The image ships the qrl-wallet-cli + qrlenv binaries too, since the
+# dashboard is the natural place from which an operator would run them
+# via `docker exec dashboard qrl-wallet-cli list` — although the
+# recommended flow is host-side qrl-wallet-cli via the Unix socket
+# mount, which sidesteps the exec-into-container class of risk.
+#
+# All persistent state (keystores, session tokens, sessions map) lives
+# under /opt/qrl/data which the operator bind-mounts. Nothing writable
+# outside that path (compose sets read_only:true).
+
+# Base image pinned by digest — refresh via docker/refresh-base-digests.sh.
+# See docker/BASE-IMAGE-DIGESTS.md for the "why" (supply-chain).
+ARG RUNTIME_IMAGE=node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+ARG GO_BUILDER_IMAGE=golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59
+
+# --- builder stage: mldsa87keygen for the container's target arch -----------
+# The dashboard release-pipeline endpoints (task #100 C4) shell out to
+# sign-images.sh / verify-images.sh, which invoke `mldsa87keygen -sign|-verify`
+# — a Go binary. The source tree lives at qrl-2.0/tools/mldsa87keygen/ and its
+# host-built binary is macOS-native (won't run in Linux containers). Build a
+# Linux-native copy at image-build time so container-side release actions have
+# a working binary. The scripts respect QRL_MLDSA_BIN, set by the docker-sock
+# overlay to /opt/qrl/bin/mldsa87keygen.
+
+FROM ${GO_BUILDER_IMAGE} AS mldsa-builder
+RUN apk add --no-cache git
+WORKDIR /src
+COPY qrl-2.0/tools/mldsa87keygen/ /src/mldsa87keygen/
+WORKDIR /src/mldsa87keygen
+RUN go build -buildvcs=false -trimpath -ldflags="-s -w" -o /out/mldsa87keygen .
+
+FROM ${RUNTIME_IMAGE} AS runtime
+
+# bash + docker-cli enable the dashboard's release-pipeline actions
+# (task #100 C4): build-images.sh / sign-images.sh / verify-images.sh /
+# release.sh / load-release.sh all shebang to bash and shell out to
+# docker buildx. Paired with the docker-compose.docker-sock.yaml overlay
+# they run from inside the container without needing bare-metal.
+RUN apk add --no-cache ca-certificates tini bash docker-cli docker-cli-buildx \
+    openssl perl-utils python3
+# openssl: gen-tls-cert.sh
+# perl-utils: shasum (portable alias for `sha256sum -a 256` used by sign/verify-images.sh)
+# python3: sign-images.sh + release.sh emit final .qrlsig / RELEASE.json via python3 -c 'import json...'
+# (go is not needed at runtime — mldsa87keygen is pre-built by the mldsa-builder stage above)
+
+# node:22-alpine already ships a `node` user at UID/GID 1000. Reuse it
+# rather than fighting the image — same numeric IDs match what the other
+# popup-node images use (qrl:1000), so file ownership across images is
+# consistent.
+RUN mkdir -p /opt/qrl/app /opt/qrl/data /opt/qrl/bin \
+    && chown -R 1000:1000 /opt/qrl
+
+# App tree. We copy each dashboard-relevant sub-tree separately so we
+# don't accidentally pull in build artefacts, snapshots, or the whole
+# qrl-2.0 / qrl-1.0 upstream sources (multi-GB each).
+COPY --chown=1000:1000 status-server.js       /opt/qrl/app/
+COPY --chown=1000:1000 dashboard-v2.html      /opt/qrl/app/
+COPY --chown=1000:1000 token-images.json      /opt/qrl/app/
+COPY --chown=1000:1000 lib/                   /opt/qrl/app/lib/
+COPY --chown=1000:1000 web/                   /opt/qrl/app/web/
+COPY --chown=1000:1000 vendor/hash-wasm/      /opt/qrl/app/vendor/hash-wasm/
+COPY --chown=1000:1000 bin/qrl-wallet-cli.js  /opt/qrl/bin/qrl-wallet-cli
+COPY --chown=1000:1000 bin/qrlenv             /opt/qrl/bin/qrlenv
+COPY --chown=1000:1000 bin/detect-extip.sh    /opt/qrl/bin/detect-extip.sh
+# mldsa87keygen from the builder stage — Linux-native so release scripts
+# can sign/verify inside the container. Compose sets QRL_MLDSA_BIN to
+# this path via the docker-sock overlay.
+COPY --from=mldsa-builder --chown=1000:1000 /out/mldsa87keygen /opt/qrl/bin/mldsa87keygen
+
+# Drop any setuid/setgid bits.
+RUN find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -exec chmod a-s {} + 2>/dev/null || true
+
+USER 1000:1000
+WORKDIR /opt/qrl/app
+
+# Dashboard HTTP listens on 8080 by default (see status-server.js `const PORT = 8080`).
+# The Unix socket ($HOME/.qrl-dashboard/api.sock) is created inside the
+# container at UID 1000's HOME; the operator can bind-mount the parent
+# directory to expose it to the host.
+EXPOSE 8080
+
+ENTRYPOINT ["/sbin/tini", "-g", "--", "node", "/opt/qrl/app/status-server.js"]

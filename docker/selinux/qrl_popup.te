@@ -1,0 +1,115 @@
+# SELinux Type Enforcement policy for the QRL popup-node stack.
+#
+# Carves out a `qrl_popup_t` process domain for the five services
+# (gqrl / beacon / validator / dashboard / bootstrap-fetcher) so
+# they transition out of `unconfined_t` on container start. The
+# data on disk is relabeled `qrl_popup_data_t`; the executables
+# inside the images carry `qrl_popup_exec_t`.
+#
+# Compile:
+#   checkmodule -M -m -o qrl_popup.mod qrl_popup.te
+#   semodule_package -o qrl_popup.pp -m qrl_popup.mod
+#   semodule -i qrl_popup.pp
+#
+# Label the bind-mounted dirs:
+#   semanage fcontext -a -t qrl_popup_data_t 'DATA_ROOT(/.*)?'
+#   restorecon -R DATA_ROOT
+#
+# Attach to containers (see docker-compose.selinux.yaml):
+#   security_opt:
+#     - label=type:qrl_popup_t
+
+policy_module(qrl_popup, 1.0.0)
+
+########################################
+# Declarations
+########################################
+
+require {
+    type unconfined_t;
+    type container_runtime_t;
+    type container_var_lib_t;
+    type init_t;
+    type proc_t;
+    type sysctl_t;
+    type sysfs_t;
+    type kernel_t;
+    type tmp_t;
+    type devpts_t;
+    type unlabeled_t;
+    class file  { read write open getattr setattr create unlink link rename lock append execute ioctl };
+    class dir   { read write open getattr setattr create rmdir add_name remove_name search reparent rename };
+    class lnk_file { read getattr };
+    class sock_file { read write open getattr create unlink };
+    class fifo_file { read write open getattr create unlink };
+    class capability { net_bind_service dac_override chown fowner setuid setgid };
+    class process { signal sigchld sigkill sigstop };
+    class tcp_socket { create bind listen accept connect read write };
+    class udp_socket { create bind read write };
+    class unix_stream_socket { create bind listen accept connect read write };
+    class unix_dgram_socket  { create bind read write };
+}
+
+type qrl_popup_t;
+type qrl_popup_exec_t;
+type qrl_popup_data_t;
+
+# Container runtime transitions the process into qrl_popup_t when
+# it executes qrl_popup_exec_t.
+domain_type(qrl_popup_t)
+domain_entry_file(qrl_popup_t, qrl_popup_exec_t)
+role system_r types qrl_popup_t;
+files_type(qrl_popup_data_t)
+
+########################################
+# Deny the nation-state escape surface
+########################################
+
+# No mount / remount / umount
+neverallow qrl_popup_t self:capability { sys_admin sys_module sys_rawio sys_boot sys_ptrace mac_admin mac_override };
+neverallow qrl_popup_t self:process { ptrace };
+# No writes to proc/sys kernel-tuning surface
+neverallow qrl_popup_t { proc_t sysctl_t sysfs_t kernel_t }:file { write append setattr };
+# No module load
+neverallow qrl_popup_t self:system { module_load module_request };
+# No raw/packet sockets
+neverallow qrl_popup_t self:packet_socket *;
+neverallow qrl_popup_t self:rawip_socket *;
+
+########################################
+# Allow — scoped to what the services need
+########################################
+
+# Bind to the compose TCP + UDP ports (p2p 13000-14000, exec 9545-9648,
+# auth 9551-9554, beacon 3600/4100, monitoring 8080-8280, dashboard
+# 8080/8180/8280). Range is intentionally kept loose so re-mapping via
+# .env does not force a policy rebuild.
+allow qrl_popup_t self:capability { net_bind_service dac_override setuid setgid chown fowner };
+allow qrl_popup_t self:tcp_socket  { create bind listen accept connect read write };
+allow qrl_popup_t self:udp_socket  { create bind read write };
+allow qrl_popup_t self:unix_stream_socket { create bind listen accept connect read write };
+allow qrl_popup_t self:unix_dgram_socket  { create bind read write };
+
+# Read + write datadir, read keystore + config
+allow qrl_popup_t qrl_popup_data_t:dir  { read write open getattr setattr create rmdir add_name remove_name search reparent rename };
+allow qrl_popup_t qrl_popup_data_t:file { read write open getattr setattr create unlink link rename lock append ioctl };
+allow qrl_popup_t qrl_popup_data_t:lnk_file { read getattr };
+allow qrl_popup_t qrl_popup_data_t:sock_file { read write open getattr create unlink };
+allow qrl_popup_t qrl_popup_data_t:fifo_file { read write open getattr create unlink };
+
+# Scratch space (/tmp)
+allow qrl_popup_t tmp_t:dir  { read write open getattr add_name remove_name search };
+allow qrl_popup_t tmp_t:file { read write open getattr create unlink };
+
+# Read-only proc introspection
+allow qrl_popup_t proc_t:dir  { read open getattr search };
+allow qrl_popup_t proc_t:file { read open getattr };
+allow qrl_popup_t proc_t:lnk_file { read getattr };
+allow qrl_popup_t sysfs_t:dir  { read open getattr search };
+allow qrl_popup_t sysfs_t:file { read open getattr };
+
+# Signals within own domain
+allow qrl_popup_t self:process { signal sigchld sigkill sigstop };
+
+# Container runtime transition
+container_runtime_t:process { transition };

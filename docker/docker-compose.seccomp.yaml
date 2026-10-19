@@ -1,0 +1,78 @@
+# Seccomp overlay — applies the custom QRL seccomp profile
+# (docker/popup-node/seccomp-qrl.json) to every popup-node service.
+#
+# The base docker-compose.yaml uses Docker's default seccomp profile
+# (via `security_opt: [no-new-privileges:true]` alone). This overlay
+# REPLACES that default with our tighter allowlist (263 syscalls,
+# default-deny), derived from the empirical audit in
+# docker/popup-node/SYSCALL-AUDIT.md.
+#
+# Use with:
+#   qrlenv run -- docker compose \
+#       -f docker-compose.yaml \
+#       -f docker-compose.hardened.yaml \
+#       -f docker-compose.seccomp.yaml \
+#       up
+#
+# Note: docker reads the seccomp profile from the HOST filesystem
+# (not inside the container). The relative path resolves against the
+# compose file's directory (docker/), so `./popup-node/seccomp-qrl.json`
+# resolves to `docker/popup-node/seccomp-qrl.json` on the host.
+#
+# Note: `docker compose` APPENDS `security_opt` lists across overlays
+# (it deduplicates only when items are exactly equal). So the merged
+# result here is `[no-new-privileges:true, seccomp=./popup-node/...]`
+# — base's `no-new-privileges` is preserved automatically, we only
+# need to add the seccomp entry.
+#
+# Status: STARTER profile. Verified: gqrl + beacon-chain both boot
+# and run cleanly under it (15s single-container + 60s trace-audit).
+# NOT yet verified against long-running edge paths (DB compaction,
+# HTTP request storm, P2P reconnect loops). Track hardening under
+# nodes task #76.
+
+services:
+
+  gqrl-node1:
+    security_opt:
+      - "seccomp=./popup-node/seccomp-qrl.json"
+
+  gqrl-node2:
+    security_opt:
+      - "seccomp=./popup-node/seccomp-qrl.json"
+
+  gqrl-node3:
+    security_opt:
+      - "seccomp=./popup-node/seccomp-qrl.json"
+
+  gqrl-node4:
+    security_opt:
+      - "seccomp=./popup-node/seccomp-qrl.json"
+
+  beacon-node1:
+    security_opt:
+      - "seccomp=./popup-node/seccomp-qrl.json"
+
+  beacon-node2:
+    security_opt:
+      - "seccomp=./popup-node/seccomp-qrl.json"
+
+  beacon-node3:
+    security_opt:
+      - "seccomp=./popup-node/seccomp-qrl.json"
+
+  beacon-node4:
+    security_opt:
+      - "seccomp=./popup-node/seccomp-qrl.json"
+
+  bootstrap-fetcher:
+    security_opt:
+      - "seccomp=./popup-node/seccomp-qrl.json"
+
+  validator:
+    security_opt:
+      - "seccomp=./popup-node/seccomp-qrl.json"
+
+  dashboard:
+    security_opt:
+      - "seccomp=./popup-node/seccomp-qrl.json"

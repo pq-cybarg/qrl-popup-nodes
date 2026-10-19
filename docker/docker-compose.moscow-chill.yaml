@@ -1,0 +1,85 @@
+# Moscow-chill overlay — swaps every gqrl service to build/run the
+# moscow-chill variant (qrl-2.0/variants/moscow-chill, DigitalGuards
+# QIP precompiles at 0x03 SHAKE256 + 0x06 ML-DSA-87 detached verify —
+# the canonical QRL 2.0 spec precompiles that rescue-edition builds on
+# top of).
+#
+# Use for an isolated compose project (typically `l2-moscow`) running
+# alongside qrl-popup and l2-rescue, so a third variant can be tested
+# in parallel without disturbing the other stacks.
+#
+# Bring up:
+#   QRL_DATA_DIR=./data-l2-moscow \
+#     qrlenv run -- docker compose -p l2-moscow \
+#       -f docker/docker-compose.yaml \
+#       -f docker/docker-compose.docker-sock.yaml \
+#       -f docker/docker-compose.moscow-chill.yaml \
+#       up -d
+#
+# Port scheme (shifted +400 from qrl-popup to clear l2-rescue's +200):
+#   gqrl-node[1-4] HTTP RPC   9545-9548  →  9945-9948
+#   gqrl-node[1-4] WS         9645-9648  →  10045-10048
+#   beacon-node1  REST/gRPC   3600/4100  →  4000/4500
+#   dashboard     HTTP        8080       →  8280
+
+# Reference an existing qrl-gqrl:moscow-chill image (produced by
+# docker/build-images.sh moscow-chill or docker buildx with the variant
+# build-arg). Same no-build rationale as the rescue overlay.
+x-gqrl-moscow: &gqrl-moscow
+  image: qrl-gqrl:moscow-chill
+  pull_policy: never
+
+services:
+  # ── Execution layer (moscow-chill variant) ───────────────────────────
+  gqrl-node1:
+    <<: *gqrl-moscow
+    container_name: l2-moscow-gqrl-node1
+    ports: !override
+      - "127.0.0.1:9945:9545"
+      - "127.0.0.1:10045:9645"
+  gqrl-node2:
+    <<: *gqrl-moscow
+    container_name: l2-moscow-gqrl-node2
+    ports: !override
+      - "127.0.0.1:9946:9545"
+      - "127.0.0.1:10046:9645"
+  gqrl-node3:
+    <<: *gqrl-moscow
+    container_name: l2-moscow-gqrl-node3
+    ports: !override
+      - "127.0.0.1:9947:9545"
+      - "127.0.0.1:10047:9645"
+  gqrl-node4:
+    <<: *gqrl-moscow
+    container_name: l2-moscow-gqrl-node4
+    ports: !override
+      - "127.0.0.1:9948:9545"
+      - "127.0.0.1:10048:9645"
+
+  # ── Consensus layer (unchanged binary, isolated names/ports) ─────────
+  beacon-node1:
+    container_name: l2-moscow-beacon-node1
+    ports: !override
+      - "127.0.0.1:4500:4100"
+      - "127.0.0.1:4000:3600"
+  beacon-node2:
+    container_name: l2-moscow-beacon-node2
+  beacon-node3:
+    container_name: l2-moscow-beacon-node3
+  beacon-node4:
+    container_name: l2-moscow-beacon-node4
+  bootstrap-fetcher:
+    container_name: l2-moscow-bootstrap-fetcher
+  validator:
+    container_name: l2-moscow-validator
+
+  # ── Dashboard on port 8280 (qrl-popup:8080, l2-rescue:8180) ──────────
+  dashboard:
+    container_name: l2-moscow-dashboard
+    ports: !override
+      - "127.0.0.1:8280:8080"
+    environment:
+      COMPOSE_PROJECT_NAME: l2-moscow
+      # Distinct rank label so operator can tell this stack apart from
+      # LEAD (qrl-popup) and L2 (l2-rescue) in the header identity chip.
+      QRL_STACK_RANK: MC

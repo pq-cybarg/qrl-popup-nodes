@@ -1,0 +1,107 @@
+<link rel="icon" type="image/svg+xml" href="{{ '/assets/favicon.svg' | relative_url }}">
+<link rel="icon" type="image/png" sizes="32x32" href="{{ '/assets/favicon-32.png' | relative_url }}">
+<meta name="theme-color" content="#3aa0ff">
+<meta property="og:site_name" content="QRL Popup Nodes">
+<meta property="og:type" content="website">
+<meta property="og:image" content="{{ '/assets/og-image.svg' | relative_url }}">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="{{ '/assets/og-image.svg' | relative_url }}">
+<style>
+  .hero {
+    padding: 2rem 0 2.5rem 0;
+    text-align: left;
+    border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+    margin-bottom: 2rem;
+  }
+  .hero h1 {
+    font-size: 2.4rem !important;
+    margin-top: 0 !important;
+    margin-bottom: 0.75rem !important;
+    letter-spacing: -0.02em;
+    background: linear-gradient(90deg, #3aa0ff 0%, #b070ff 50%, #ff5577 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+  }
+  .hero .tagline {
+    font-size: 1.1rem;
+    opacity: 0.85;
+    max-width: 44rem;
+    line-height: 1.5;
+    margin-bottom: 1.5rem;
+  }
+  .hero .badges img {
+    display: inline-block;
+    margin: 0 0.2rem 0.4rem 0;
+    vertical-align: middle;
+  }
+  .hero-cta {
+    display: inline-flex;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    margin-top: 0.5rem;
+  }
+  .hero-cta a {
+    display: inline-block;
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    text-decoration: none;
+    font-weight: 500;
+    font-size: 0.95rem;
+    transition: transform 0.08s ease, box-shadow 0.08s ease;
+  }
+  .hero-cta a:hover { transform: translateY(-1px); text-decoration: none; }
+  .hero-cta a.primary {
+    background: linear-gradient(90deg, #3aa0ff, #b070ff);
+    color: #0a0f1a;
+    box-shadow: 0 0 0 1px rgba(58, 160, 255, 0.4);
+  }
+  .hero-cta a.primary:hover { box-shadow: 0 2px 12px rgba(58, 160, 255, 0.4); }
+  .hero-cta a.secondary {
+    border: 1px solid rgba(128, 128, 128, 0.4);
+  }
+  .stack-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 1rem;
+    margin: 1.5rem 0;
+  }
+  .stack-card {
+    padding: 1rem;
+    border-radius: 8px;
+    border: 1px solid rgba(128, 128, 128, 0.25);
+    background: rgba(255, 255, 255, 0.02);
+  }
+  .stack-card .rank-chip {
+    display: inline-block;
+    padding: 0.15rem 0.55rem;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.5rem;
+  }
+  .stack-card.lead .rank-chip { background: rgba(58, 160, 255, 0.15); color: #3aa0ff; border: 1px solid #3aa0ff; }
+  .stack-card.l2 .rank-chip   { background: rgba(255, 85, 119, 0.15); color: #ff5577; border: 1px solid #ff5577; }
+  .stack-card.mc .rank-chip   { background: rgba(176, 112, 255, 0.15); color: #b070ff; border: 1px solid #b070ff; }
+  .stack-card h3 {
+    margin: 0.25rem 0 0.4rem 0 !important;
+    font-size: 1rem !important;
+    font-family: monospace;
+  }
+  .stack-card p {
+    margin: 0.25rem 0 !important;
+    font-size: 0.85rem;
+    opacity: 0.85;
+  }
+  .stack-card .port-row {
+    margin-top: 0.6rem;
+    font-family: monospace;
+    font-size: 0.75rem;
+    opacity: 0.7;
+  }
+</style>

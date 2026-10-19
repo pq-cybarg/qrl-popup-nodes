@@ -1,0 +1,87 @@
+# Phase 2 hardening overlay.
+#
+# Overlays on top of docker-compose.yaml (and optionally
+# docker-compose.podman.yaml) to enable:
+#
+#  * Alternative container runtime — gVisor (`runsc`) or Kata (`kata-runtime`)
+#    — for containers that need kernel-boundary isolation from the host.
+#    Selection via `QRL_RUNTIME` in .env; empty falls back to the engine
+#    default (runc/crun).
+#
+# Use with:
+#   qrlenv run -- docker compose -f docker-compose.yaml -f docker-compose.hardened.yaml up
+# or, layered with podman:
+#   qrlenv run -- podman compose \
+#       -f docker-compose.yaml \
+#       -f docker-compose.podman.yaml \
+#       -f docker-compose.hardened.yaml up
+#
+# ---------- what still lives outside this overlay -----------------------------
+#
+# * Custom seccomp profile — deferred; needs a syscall-audit pass against
+#   real gqrl + beacon-chain workloads to avoid crashing on legit syscalls
+#   the default profile allows. Track under task #72 follow-up.
+# * AppArmor / SELinux profiles — deferred; need a Linux host with the
+#   respective LSM loaded to author + test. On macOS we can't validate.
+# * Digest-pinned base images — deferred; needs a stable base-image
+#   selection pass (alpine:3.20 → alpine@sha256:...) with a documented
+#   refresh cadence.
+#
+# ---------- runtime notes -----------------------------------------------------
+#
+# gVisor (`runsc`) intercepts syscalls in userspace, dramatically shrinking
+# the kernel attack surface — a kernel 0-day the attacker knows and we
+# don't is neutralized by ~90% because most syscalls never reach the host
+# kernel. Perf cost: ~20-40% slower syscall-heavy workloads. gqrl and
+# beacon-chain are mostly network + disk; expect the hit to be noticeable
+# but not disqualifying for a popup node.
+#
+# Kata (`kata-runtime`) puts each container in its own microVM.
+# **This is our supported QEMU path** — Kata's default hypervisor is
+# QEMU (configurable to cloud-hypervisor or Firecracker if you want a
+# smaller attack surface at the cost of some device support). Setting
+# QRL_RUNTIME=kata-runtime gets you QEMU-backed microVM isolation for
+# every popup-node container without touching the compose semantics.
+# Highest isolation ceiling — a VM escape is needed, not just container
+# escape. Perf cost: cold-start seconds instead of ms; runtime overhead
+# per-request is low.
+#
+# For pure-QEMU-without-Kata (each container in a hand-managed QEMU VM,
+# no OCI runtime wrapper), that's a different substrate — not supported
+# by this compose file. If you need it, the flow is: build the OCI
+# tarballs (docker/build-images.sh), extract with skopeo or umoci, boot
+# a QEMU guest with the extracted rootfs. Track under nodes task #89.
+#
+# Both must be installed on the host + registered with the container
+# engine. See:
+#   https://gvisor.dev/docs/user_guide/install/
+#   https://github.com/kata-containers/kata-containers/blob/main/docs/install/README.md
+
+services:
+
+  gqrl-node1:
+    runtime: ${QRL_RUNTIME:-}
+  gqrl-node2:
+    runtime: ${QRL_RUNTIME:-}
+  gqrl-node3:
+    runtime: ${QRL_RUNTIME:-}
+  gqrl-node4:
+    runtime: ${QRL_RUNTIME:-}
+
+  beacon-node1:
+    runtime: ${QRL_RUNTIME:-}
+  beacon-node2:
+    runtime: ${QRL_RUNTIME:-}
+  beacon-node3:
+    runtime: ${QRL_RUNTIME:-}
+  beacon-node4:
+    runtime: ${QRL_RUNTIME:-}
+
+  bootstrap-fetcher:
+    runtime: ${QRL_RUNTIME:-}
+
+  validator:
+    runtime: ${QRL_RUNTIME:-}
+
+  dashboard:
+    runtime: ${QRL_RUNTIME:-}

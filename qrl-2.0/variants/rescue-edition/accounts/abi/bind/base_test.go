@@ -1,0 +1,513 @@
+// Copyright 2019 The go-ethereum Authors
+// This file is part of the go-ethereum library.
+//
+// The go-ethereum library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Lesser General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The go-ethereum library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public License
+// along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
+
+package bind_test
+
+import (
+	"context"
+	"encoding/hex"
+	"errors"
+	"math/big"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	qrl "github.com/theQRL/go-qrl"
+	"github.com/theQRL/go-qrl/accounts/abi"
+	"github.com/theQRL/go-qrl/accounts/abi/bind"
+	"github.com/theQRL/go-qrl/common"
+	"github.com/theQRL/go-qrl/core/types"
+	"github.com/theQRL/go-qrl/crypto"
+	"github.com/theQRL/go-qrl/rlp"
+)
+
+func mockSign(addr common.Address, tx *types.Transaction) (*types.Transaction, error) { return tx, nil }
+
+type mockTransactor struct {
+	baseFee                *big.Int
+	gasTipCap              *big.Int
+	gasPrice               *big.Int
+	suggestGasTipCapCalled bool
+	suggestGasPriceCalled  bool
+}
+
+func (mt *mockTransactor) HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error) {
+	return &types.Header{BaseFee: mt.baseFee}, nil
+}
+
+func (mt *mockTransactor) PendingCodeAt(ctx context.Context, account common.Address) ([]byte, error) {
+	return []byte{1}, nil
+}
+
+func (mt *mockTransactor) PendingNonceAt(ctx context.Context, account common.Address) (uint64, error) {
+	return 0, nil
+}
+
+func (mt *mockTransactor) SuggestGasPrice(ctx context.Context) (*big.Int, error) {
+	mt.suggestGasPriceCalled = true
+	return mt.gasPrice, nil
+}
+
+func (mt *mockTransactor) SuggestGasTipCap(ctx context.Context) (*big.Int, error) {
+	mt.suggestGasTipCapCalled = true
+	return mt.gasTipCap, nil
+}
+
+func (mt *mockTransactor) EstimateGas(ctx context.Context, call qrl.CallMsg) (gas uint64, err error) {
+	return 0, nil
+}
+
+func (mt *mockTransactor) SendTransaction(ctx context.Context, tx *types.Transaction) error {
+	return nil
+}
+
+type mockCaller struct {
+	codeAtBlockNumber       *big.Int
+	callContractBlockNumber *big.Int
+	callContractBytes       []byte
+	callContractErr         error
+	codeAtBytes             []byte
+	codeAtErr               error
+}
+
+func (mc *mockCaller) CodeAt(ctx context.Context, contract common.Address, blockNumber *big.Int) ([]byte, error) {
+	mc.codeAtBlockNumber = blockNumber
+	return mc.codeAtBytes, mc.codeAtErr
+}
+
+func (mc *mockCaller) CallContract(ctx context.Context, call qrl.CallMsg, blockNumber *big.Int) ([]byte, error) {
+	mc.callContractBlockNumber = blockNumber
+	return mc.callContractBytes, mc.callContractErr
+}
+
+type mockPendingCaller struct {
+	*mockCaller
+	pendingCodeAtBytes        []byte
+	pendingCodeAtErr          error
+	pendingCodeAtCalled       bool
+	pendingCallContractCalled bool
+	pendingCallContractBytes  []byte
+	pendingCallContractErr    error
+}
+
+func (mc *mockPendingCaller) PendingCodeAt(ctx context.Context, contract common.Address) ([]byte, error) {
+	mc.pendingCodeAtCalled = true
+	return mc.pendingCodeAtBytes, mc.pendingCodeAtErr
+}
+
+func (mc *mockPendingCaller) PendingCallContract(ctx context.Context, call qrl.CallMsg) ([]byte, error) {
+	mc.pendingCallContractCalled = true
+	return mc.pendingCallContractBytes, mc.pendingCallContractErr
+}
+
+func TestPassingBlockNumber(t *testing.T) {
+	mc := &mockPendingCaller{
+		mockCaller: &mockCaller{
+			codeAtBytes: []byte{1, 2, 3},
+		},
+	}
+	contractAddr, _ := common.NewAddressFromString("Q00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
+	bc := bind.NewBoundContract(contractAddr, abi.ABI{
+		Methods: map[string]abi.Method{
+			"something": {
+				Name:    "something",
+				Outputs: abi.Arguments{},
+			},
+		},
+	}, mc, nil, nil)
+
+	blockNumber := big.NewInt(42)
+
+	bc.Call(&bind.CallOpts{BlockNumber: blockNumber}, nil, "something")
+
+	if mc.callContractBlockNumber != blockNumber {
+		t.Fatalf("CallContract() was not passed the block number")
+	}
+
+	if mc.codeAtBlockNumber != blockNumber {
+		t.Fatalf("CodeAt() was not passed the block number")
+	}
+
+	bc.Call(&bind.CallOpts{}, nil, "something")
+
+	if mc.callContractBlockNumber != nil {
+		t.Fatalf("CallContract() was passed a block number when it should not have been")
+	}
+
+	if mc.codeAtBlockNumber != nil {
+		t.Fatalf("CodeAt() was passed a block number when it should not have been")
+	}
+
+	bc.Call(&bind.CallOpts{BlockNumber: blockNumber, Pending: true}, nil, "something")
+
+	if !mc.pendingCallContractCalled {
+		t.Fatalf("CallContract() was not passed the block number")
+	}
+
+	if !mc.pendingCodeAtCalled {
+		t.Fatalf("CodeAt() was not passed the block number")
+	}
+}
+
+// mockSender is the 64-byte address encoded into hexData (the non-indexed
+// portion of every mock "received(...)" event used in these tests). It also
+// replaces the 20-byte hex literals that used to be parsed via
+// NewAddressFromString.
+var mockSender = func() common.Address {
+	raw, _ := hex.DecodeString("978271565f56deb45495afa69e59c16ab2376c47978271565f56deb45495afa69e59c16ab2112233445566778899aabb")
+	return common.BytesToAddress(raw)
+}()
+
+// hexData is the ABI-encoded non-indexed payload (address, uint256, bytes) =
+// (mockSender, 1, [88]) as produced by abi.Pack with a 64-byte slot width.
+var hexData = func() []byte {
+	const spec = `[{"name":"f","type":"function","inputs":[{"type":"address"},{"type":"uint256"},{"type":"bytes"}]}]`
+	a, _ := abi.JSON(strings.NewReader(spec))
+	packed, _ := a.Pack("f", mockSender, big.NewInt(1), []byte{88})
+	return packed[4:]
+}()
+
+func TestUnpackIndexedStringTyLogIntoMap(t *testing.T) {
+	hash := crypto.Keccak256Hash([]byte("testName"))
+	topics := []common.LogTopic{
+		common.BytesToEventSignatureLogTopic(crypto.Keccak256([]byte("received(string,address,uint256,bytes)"))),
+		common.BytesToLogTopic(hash.Bytes()),
+	}
+	mockLog := newMockLog(topics, common.HexToHash("0x0"))
+
+	abiString := `[{"anonymous":false,"inputs":[{"indexed":true,"name":"name","type":"string"},{"indexed":false,"name":"sender","type":"address"},{"indexed":false,"name":"amount","type":"uint256"},{"indexed":false,"name":"memo","type":"bytes"}],"name":"received","type":"event"}]`
+	parsedAbi, _ := abi.JSON(strings.NewReader(abiString))
+	bc := bind.NewBoundContract(common.Address{}, parsedAbi, nil, nil, nil)
+
+	expectedReceivedMap := map[string]any{
+		"name":   common.BytesToLogTopic(hash.Bytes()),
+		"sender": mockSender,
+		"amount": big.NewInt(1),
+		"memo":   []byte{88},
+	}
+	unpackAndCheck(t, bc, expectedReceivedMap, mockLog)
+}
+
+func TestUnpackAnonymousLogIntoMap(t *testing.T) {
+	mockLog := newMockLog(nil, common.HexToHash("0x0"))
+
+	abiString := `[{"anonymous":false,"inputs":[{"indexed":false,"name":"amount","type":"uint256"}],"name":"received","type":"event"}]`
+	parsedAbi, _ := abi.JSON(strings.NewReader(abiString))
+	contractAddr, _ := common.NewAddressFromString("Q00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
+	bc := bind.NewBoundContract(contractAddr, parsedAbi, nil, nil, nil)
+
+	var received map[string]any
+	err := bc.UnpackLogIntoMap(received, "received", mockLog)
+	if err == nil {
+		t.Error("unpacking anonymous event is not supported")
+	}
+	if err.Error() != "no event signature" {
+		t.Errorf("expected error 'no event signature', got '%s'", err)
+	}
+}
+
+func TestUnpackIndexedSliceTyLogIntoMap(t *testing.T) {
+	sliceBytes, err := rlp.EncodeToBytes([]string{"name1", "name2", "name3", "name4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := crypto.Keccak256Hash(sliceBytes)
+	topics := []common.LogTopic{
+		common.BytesToEventSignatureLogTopic(crypto.Keccak256([]byte("received(string[],address,uint256,bytes)"))),
+		common.BytesToLogTopic(hash.Bytes()),
+	}
+	mockLog := newMockLog(topics, common.HexToHash("0x0"))
+
+	abiString := `[{"anonymous":false,"inputs":[{"indexed":true,"name":"names","type":"string[]"},{"indexed":false,"name":"sender","type":"address"},{"indexed":false,"name":"amount","type":"uint256"},{"indexed":false,"name":"memo","type":"bytes"}],"name":"received","type":"event"}]`
+	parsedAbi, _ := abi.JSON(strings.NewReader(abiString))
+	bc := bind.NewBoundContract(common.Address{}, parsedAbi, nil, nil, nil)
+
+	expectedReceivedMap := map[string]any{
+		"names":  common.BytesToLogTopic(hash.Bytes()),
+		"sender": mockSender,
+		"amount": big.NewInt(1),
+		"memo":   []byte{88},
+	}
+	unpackAndCheck(t, bc, expectedReceivedMap, mockLog)
+}
+
+func TestUnpackIndexedArrayTyLogIntoMap(t *testing.T) {
+	address1 := common.Address{}
+	address2 := mockSender
+	arrBytes, err := rlp.EncodeToBytes([2]common.Address{address1, address2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := crypto.Keccak256Hash(arrBytes)
+	topics := []common.LogTopic{
+		common.BytesToEventSignatureLogTopic(crypto.Keccak256([]byte("received(address[2],address,uint256,bytes)"))),
+		common.BytesToLogTopic(hash.Bytes()),
+	}
+	mockLog := newMockLog(topics, common.HexToHash("0x0"))
+
+	abiString := `[{"anonymous":false,"inputs":[{"indexed":true,"name":"addresses","type":"address[2]"},{"indexed":false,"name":"sender","type":"address"},{"indexed":false,"name":"amount","type":"uint256"},{"indexed":false,"name":"memo","type":"bytes"}],"name":"received","type":"event"}]`
+	parsedAbi, _ := abi.JSON(strings.NewReader(abiString))
+	bc := bind.NewBoundContract(common.Address{}, parsedAbi, nil, nil, nil)
+
+	expectedReceivedMap := map[string]any{
+		"addresses": common.BytesToLogTopic(hash.Bytes()),
+		"sender":    mockSender,
+		"amount":    big.NewInt(1),
+		"memo":      []byte{88},
+	}
+	unpackAndCheck(t, bc, expectedReceivedMap, mockLog)
+}
+
+func TestUnpackIndexedFuncTyLogIntoMap(t *testing.T) {
+	addrBytes := mockSender.Bytes()
+	hash := crypto.Keccak256Hash([]byte("mockFunction(address,uint)"))
+	functionSelector := hash[:4]
+	functionTyBytes := append(addrBytes, functionSelector...)
+	topics := []common.LogTopic{
+		common.BytesToEventSignatureLogTopic(crypto.Keccak256([]byte("received(function,address,uint256,bytes)"))),
+		common.BytesToLogTopic(functionTyBytes),
+	}
+	mockLog := newMockLog(topics, common.HexToHash("0x5c698f13940a2153440c6d19660878bc90219d9298fdcf37365aa8d88d40fc42"))
+	abiString := `[{"anonymous":false,"inputs":[{"indexed":true,"name":"function","type":"function"},{"indexed":false,"name":"sender","type":"address"},{"indexed":false,"name":"amount","type":"uint256"},{"indexed":false,"name":"memo","type":"bytes"}],"name":"received","type":"event"}]`
+	parsedAbi, _ := abi.JSON(strings.NewReader(abiString))
+	bc := bind.NewBoundContract(common.Address{}, parsedAbi, nil, nil, nil)
+
+	received := make(map[string]any)
+	err := bc.UnpackLogIntoMap(received, "received", mockLog)
+	if err == nil {
+		t.Fatal("expected indexed function topic to be rejected")
+	}
+	if !strings.Contains(err.Error(), "function type does not fit") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestUnpackIndexedBytesTyLogIntoMap(t *testing.T) {
+	bytes := []byte{1, 2, 3, 4, 5}
+	hash := crypto.Keccak256Hash(bytes)
+	topics := []common.LogTopic{
+		common.BytesToEventSignatureLogTopic(crypto.Keccak256([]byte("received(bytes,address,uint256,bytes)"))),
+		common.BytesToLogTopic(hash.Bytes()),
+	}
+	mockLog := newMockLog(topics, common.HexToHash("0x5c698f13940a2153440c6d19660878bc90219d9298fdcf37365aa8d88d40fc42"))
+
+	abiString := `[{"anonymous":false,"inputs":[{"indexed":true,"name":"content","type":"bytes"},{"indexed":false,"name":"sender","type":"address"},{"indexed":false,"name":"amount","type":"uint256"},{"indexed":false,"name":"memo","type":"bytes"}],"name":"received","type":"event"}]`
+	parsedAbi, _ := abi.JSON(strings.NewReader(abiString))
+	bc := bind.NewBoundContract(common.Address{}, parsedAbi, nil, nil, nil)
+
+	expectedReceivedMap := map[string]any{
+		"content": common.BytesToLogTopic(hash.Bytes()),
+		"sender":  mockSender,
+		"amount":  big.NewInt(1),
+		"memo":    []byte{88},
+	}
+	unpackAndCheck(t, bc, expectedReceivedMap, mockLog)
+}
+
+func TestTransactGasFee(t *testing.T) {
+	assert := assert.New(t)
+
+	// GasTipCap and GasFeeCap
+	// When opts.GasTipCap and opts.GasFeeCap are nil
+	mt := &mockTransactor{baseFee: big.NewInt(100), gasTipCap: big.NewInt(5)}
+	bc := bind.NewBoundContract(common.Address{}, abi.ABI{}, nil, mt, nil)
+	opts := &bind.TransactOpts{Signer: mockSign}
+	tx, err := bc.Transact(opts, "")
+	assert.Nil(err)
+	assert.Equal(big.NewInt(5), tx.GasTipCap())
+	assert.Equal(big.NewInt(205), tx.GasFeeCap())
+	assert.Nil(opts.GasTipCap)
+	assert.Nil(opts.GasFeeCap)
+	assert.True(mt.suggestGasTipCapCalled)
+
+	// Second call to Transact should use latest suggested GasTipCap
+	mt.gasTipCap = big.NewInt(6)
+	mt.suggestGasTipCapCalled = false
+	tx, err = bc.Transact(opts, "")
+	assert.Nil(err)
+	assert.Equal(big.NewInt(6), tx.GasTipCap())
+	assert.Equal(big.NewInt(206), tx.GasFeeCap())
+	assert.True(mt.suggestGasTipCapCalled)
+}
+
+func unpackAndCheck(t *testing.T, bc *bind.BoundContract, expected map[string]any, mockLog types.Log) {
+	received := make(map[string]any)
+	if err := bc.UnpackLogIntoMap(received, "received", mockLog); err != nil {
+		t.Error(err)
+	}
+
+	if len(received) != len(expected) {
+		t.Fatalf("unpacked map length %v not equal expected length of %v", len(received), len(expected))
+	}
+	for name, elem := range expected {
+		if !reflect.DeepEqual(elem, received[name]) {
+			t.Errorf("field %v does not match expected, want %v, got %v", name, elem, received[name])
+		}
+	}
+}
+
+func newMockLog(topics []common.LogTopic, txHash common.Hash) types.Log {
+	return types.Log{
+		Address:     common.Address{},
+		Topics:      topics,
+		Data:        hexData,
+		BlockNumber: uint64(26),
+		TxHash:      txHash,
+		TxIndex:     111,
+		BlockHash:   common.BytesToHash([]byte{1, 2, 3, 4, 5}),
+		Index:       7,
+		Removed:     false,
+	}
+}
+
+func TestCall(t *testing.T) {
+	contractAddr, _ := common.NewAddressFromString("Q00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
+	var method, methodWithArg = "something", "somethingArrrrg"
+	tests := []struct {
+		name, method string
+		opts         *bind.CallOpts
+		mc           bind.ContractCaller
+		results      *[]any
+		wantErr      bool
+		wantErrExact error
+	}{{
+		name: "ok not pending",
+		mc: &mockCaller{
+			codeAtBytes: []byte{0},
+		},
+		method: method,
+	}, {
+		name: "ok pending",
+		mc: &mockPendingCaller{
+			pendingCodeAtBytes: []byte{0},
+		},
+		opts: &bind.CallOpts{
+			Pending: true,
+		},
+		method: method,
+	}, {
+		name:    "pack error, no method",
+		mc:      new(mockCaller),
+		method:  "else",
+		wantErr: true,
+	}, {
+		name: "interface error, pending but not a PendingContractCaller",
+		mc:   new(mockCaller),
+		opts: &bind.CallOpts{
+			Pending: true,
+		},
+		method:       method,
+		wantErrExact: bind.ErrNoPendingState,
+	}, {
+		name: "pending call canceled",
+		mc: &mockPendingCaller{
+			pendingCallContractErr: context.DeadlineExceeded,
+		},
+		opts: &bind.CallOpts{
+			Pending: true,
+		},
+		method:       method,
+		wantErrExact: context.DeadlineExceeded,
+	}, {
+		name: "pending code at error",
+		mc: &mockPendingCaller{
+			pendingCodeAtErr: errors.New(""),
+		},
+		opts: &bind.CallOpts{
+			Pending: true,
+		},
+		method:  method,
+		wantErr: true,
+	}, {
+		name: "no pending code at",
+		mc:   new(mockPendingCaller),
+		opts: &bind.CallOpts{
+			Pending: true,
+		},
+		method:       method,
+		wantErrExact: bind.ErrNoCode,
+	}, {
+		name: "call contract error",
+		mc: &mockCaller{
+			callContractErr: context.DeadlineExceeded,
+		},
+		method:       method,
+		wantErrExact: context.DeadlineExceeded,
+	}, {
+		name: "code at error",
+		mc: &mockCaller{
+			codeAtErr: errors.New(""),
+		},
+		method:  method,
+		wantErr: true,
+	}, {
+		name:         "no code at",
+		mc:           new(mockCaller),
+		method:       method,
+		wantErrExact: bind.ErrNoCode,
+	}, {
+		name: "unpack error missing arg",
+		mc: &mockCaller{
+			codeAtBytes: []byte{0},
+		},
+		method:  methodWithArg,
+		wantErr: true,
+	}, {
+		name: "interface unpack error",
+		mc: &mockCaller{
+			codeAtBytes: []byte{0},
+		},
+		method:  method,
+		results: &[]any{0},
+		wantErr: true,
+	}}
+	for _, test := range tests {
+		bc := bind.NewBoundContract(contractAddr, abi.ABI{
+			Methods: map[string]abi.Method{
+				method: {
+					Name:    method,
+					Outputs: abi.Arguments{},
+				},
+				methodWithArg: {
+					Name:    methodWithArg,
+					Outputs: abi.Arguments{abi.Argument{}},
+				},
+			},
+		}, test.mc, nil, nil)
+		err := bc.Call(test.opts, test.results, test.method)
+		if test.wantErr || test.wantErrExact != nil {
+			if err == nil {
+				t.Fatalf("%q expected error", test.name)
+			}
+			if test.wantErrExact != nil && !errors.Is(err, test.wantErrExact) {
+				t.Fatalf("%q expected error %q but got %q", test.name, test.wantErrExact, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%q unexpected error: %v", test.name, err)
+		}
+	}
+}
+
+// TestCrashers contains some strings which previously caused the abi codec to crash.
+func TestCrashers(t *testing.T) {
+	abi.JSON(strings.NewReader(`[{"inputs":[{"type":"tuple[]","components":[{"type":"bool","name":"_1"}]}]}]`))
+	abi.JSON(strings.NewReader(`[{"inputs":[{"type":"tuple[]","components":[{"type":"bool","name":"&"}]}]}]`))
+	abi.JSON(strings.NewReader(`[{"inputs":[{"type":"tuple[]","components":[{"type":"bool","name":"----"}]}]}]`))
+	abi.JSON(strings.NewReader(`[{"inputs":[{"type":"tuple[]","components":[{"type":"bool","name":"foo.Bar"}]}]}]`))
+}

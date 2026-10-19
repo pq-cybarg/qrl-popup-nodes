@@ -1,0 +1,593 @@
+# QRL popup-node 4-node localnet — rootless compose.
+#
+# All defense-in-depth flags from docs/POPUP-NODES-ROOTLESS.md phase 1:
+#
+#   read_only: true              →  rootfs read-only. Writes only to
+#                                    the /opt/qrl/data volume (mounted
+#                                    from ${QRL_DATA_DIR}) and to the
+#                                    /tmp tmpfs.
+#   security_opt: no-new-privs   →  no execve() ever raises effective
+#                                    caps. suid/sgid are already stripped
+#                                    in the Dockerfile; this closes any
+#                                    setcap route as well.
+#   cap_drop: [ALL]              →  no Linux capabilities inside. All
+#                                    ports are >1024 so we don't need
+#                                    NET_BIND_SERVICE.
+#   user: 1000:1000              →  belt-and-suspenders with USER in
+#                                    Dockerfile.
+#   ulimits.core.hard: 0         →  no coredumps on crash (defense
+#                                    against memory-scraper post-crash).
+#   restart: unless-stopped      →  survives host reboot. But NOT
+#                                    'always' — if a container refuses to
+#                                    start (e.g. crash-loops on bad config)
+#                                    the operator sees a stopped
+#                                    container and can inspect it.
+#   loopback-only port publish   →  "127.0.0.1:<host>:<container>" not
+#                                    just "<host>:<container>". Set
+#                                    QRL_EXPOSE_PUBLIC=1 to bind 0.0.0.0
+#                                    (opt-in via .env only).
+#
+# Bring-up:
+#   qrlenv run -- docker compose up          # foreground
+#   qrlenv run -- docker compose up -d       # detached
+#   qrlenv run -- docker compose down        # stop, keep volumes
+#   qrlenv run -- docker compose down -v     # stop + wipe volumes
+#
+# qrlenv is REQUIRED — this compose file references encrypted values
+# (${QRL_GENESIS_PASSWORD}, ${QRL_JWT_SECRET_NODE1..4}) that only qrlenv
+# can decrypt.
+#
+# Prerequisite: `qrlenv init` + `configure.sh` must have run once, so
+# the master key exists in the OS keychain and .env has the encrypted
+# values populated.
+
+name: qrl-popup
+
+# ---------- shared bits -------------------------------------------------------
+
+x-common-security: &common-security
+  read_only: true
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+  user: "1000:1000"
+  restart: unless-stopped
+  # tmpfs for anything the process wants to write outside its data dir.
+  tmpfs:
+    - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
+  ulimits:
+    core:
+      soft: 0
+      hard: 0
+
+# ---------- healthchecks -----------------------------------------------------
+#
+# `restart: unless-stopped` above fires only on process exit. A wedged
+# gqrl or a beacon whose gateway thread died silently would keep the
+# container "running" from Docker's view. Real healthchecks give Docker
+# / Podman signal to restart correctly and let downstream services
+# gate on `service_healthy` instead of `service_started`.
+#
+# All services use interval=15s, timeout=5s, retries=6 (=90s to
+# unhealthy), start_period=120s (genesis delay + beacon warm-up).
+# Every check is via busybox `wget` (built into alpine + node:alpine
+# base images) so no extra apk installs needed.
+
+x-gqrl-build: &gqrl-build
+  context: ..
+  dockerfile: docker/popup-node/Dockerfile.gqrl
+  args:
+    QRL_VARIANT_PATH: qrl-2.0/upstream/go-qrl
+
+x-qrysm-build: &qrysm-build
+  context: ..
+  dockerfile: docker/popup-node/Dockerfile.beacon
+
+# ---------- networks ----------------------------------------------------------
+#
+# Isolated bridge so containers talk to each other by service name
+# (`gqrl-node1`, `beacon-node1`) without touching the host bridge.
+# Host publishing only happens for ports the operator opted in via `.env`.
+
+networks:
+  qrl-popup:
+    driver: bridge
+    driver_opts:
+      # Disable inter-container comms with anything OUTSIDE this network.
+      # An operator that adds another compose project won't accidentally
+      # allow it to speak to gqrl.
+      com.docker.network.bridge.enable_icc: "true"
+      com.docker.network.bridge.enable_ip_masquerade: "true"
+
+# ---------- volumes -----------------------------------------------------------
+#
+# Bind-mounts under ${QRL_DATA_DIR} for anything the operator wants to
+# snapshot / inspect. configure.sh chowns those to UID 1000 on first run.
+#
+# A single named volume `qrl-bootstrap` holds the leader's QNR that
+# followers dial. Ephemeral, regenerated every bring-up — nothing to
+# snapshot, so a named volume is a better fit than a bind-mount here.
+
+volumes:
+  qrl-bootstrap:
+
+# ---------- services ----------------------------------------------------------
+
+services:
+
+  # ----- execution layer (4x gqrl) -----------------------------------------
+
+  gqrl-node1:
+    <<: *common-security
+    build: *gqrl-build
+    container_name: qrl-gqrl-node1
+    networks: [qrl-popup]
+    volumes:
+      - ${QRL_DATA_DIR:-./data}/node1/gqrl:/opt/qrl/data
+      - ${QRL_DATA_DIR:-./data}/node1/keystore:/opt/qrl/keystore
+      - ${QRL_DATA_DIR:-./data}/config:/opt/qrl/config:ro
+    environment:
+      QRL_JWT_SECRET: ${QRL_JWT_SECRET_NODE1}
+    ports:
+      - "127.0.0.1:${QRL_EL_HTTP_PORT_BASE:-9545}:9545"
+      - "127.0.0.1:${QRL_EL_WS_PORT_BASE:-9645}:9645"
+      # authRPC (JWT-protected engine API). Not exposed to the host by
+      # default — beacon-chain reaches it via the docker network.
+    command:
+      - "--datadir=/opt/qrl/data"
+      - "--keystore=/opt/qrl/keystore"
+      - "--http"
+      - "--http.addr=0.0.0.0"
+      - "--http.port=9545"
+      - "--http.api=web3,qrl,net,admin,txpool,miner,debug"
+      - "--ws"
+      - "--ws.addr=0.0.0.0"
+      - "--ws.port=9645"
+      - "--ws.api=web3,qrl,net"
+      - "--authrpc.addr=0.0.0.0"
+      - "--authrpc.port=9551"
+      - "--http.vhosts=*"
+      - "--authrpc.vhosts=*"
+      - "--authrpc.jwtsecret=/opt/qrl/config/jwtsecret-node1"
+      - "--networkid=${QRL_NETWORK_ID:-32333}"
+      - "--port=31303"
+      - "--ipcdisable"
+      - "--syncmode=full"
+    healthcheck:
+      # POST qrl_blockNumber; wget's -O- writes body to stdout; grep -q
+      # result ensures we got a valid JSON-RPC response, not just a TCP
+      # ACK. Fails if gqrl is wedged / HTTP thread dead.
+      test: ["CMD-SHELL", "wget -qO- --post-data='{\"jsonrpc\":\"2.0\",\"method\":\"qrl_blockNumber\",\"params\":[],\"id\":1}' --header='Content-Type: application/json' http://localhost:9545 | grep -q result"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+
+  gqrl-node2:
+    <<: *common-security
+    build: *gqrl-build
+    container_name: qrl-gqrl-node2
+    networks: [qrl-popup]
+    volumes:
+      - ${QRL_DATA_DIR:-./data}/node2/gqrl:/opt/qrl/data
+      - ${QRL_DATA_DIR:-./data}/node2/keystore:/opt/qrl/keystore
+      - ${QRL_DATA_DIR:-./data}/config:/opt/qrl/config:ro
+    environment:
+      QRL_JWT_SECRET: ${QRL_JWT_SECRET_NODE2}
+    ports:
+      - "127.0.0.1:9546:9545"
+      - "127.0.0.1:9646:9645"
+    command:
+      - "--datadir=/opt/qrl/data"
+      - "--keystore=/opt/qrl/keystore"
+      - "--http"
+      - "--http.addr=0.0.0.0"
+      - "--http.port=9545"
+      - "--http.api=web3,qrl,net,admin,txpool,miner,debug"
+      - "--ws"
+      - "--ws.addr=0.0.0.0"
+      - "--ws.port=9645"
+      - "--ws.api=web3,qrl,net"
+      - "--authrpc.addr=0.0.0.0"
+      - "--authrpc.port=9551"
+      - "--http.vhosts=*"
+      - "--authrpc.vhosts=*"
+      - "--authrpc.jwtsecret=/opt/qrl/config/jwtsecret-node2"
+      - "--networkid=${QRL_NETWORK_ID:-32333}"
+      - "--port=31303"
+      - "--ipcdisable"
+      - "--syncmode=full"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --post-data='{\"jsonrpc\":\"2.0\",\"method\":\"qrl_blockNumber\",\"params\":[],\"id\":1}' --header='Content-Type: application/json' http://localhost:9545 | grep -q result"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+
+  gqrl-node3:
+    <<: *common-security
+    build: *gqrl-build
+    container_name: qrl-gqrl-node3
+    networks: [qrl-popup]
+    volumes:
+      - ${QRL_DATA_DIR:-./data}/node3/gqrl:/opt/qrl/data
+      - ${QRL_DATA_DIR:-./data}/node3/keystore:/opt/qrl/keystore
+      - ${QRL_DATA_DIR:-./data}/config:/opt/qrl/config:ro
+    environment:
+      QRL_JWT_SECRET: ${QRL_JWT_SECRET_NODE3}
+    ports:
+      - "127.0.0.1:9547:9545"
+      - "127.0.0.1:9647:9645"
+    command:
+      - "--datadir=/opt/qrl/data"
+      - "--keystore=/opt/qrl/keystore"
+      - "--http"
+      - "--http.addr=0.0.0.0"
+      - "--http.port=9545"
+      - "--http.api=web3,qrl,net,admin,txpool,miner,debug"
+      - "--ws"
+      - "--ws.addr=0.0.0.0"
+      - "--ws.port=9645"
+      - "--ws.api=web3,qrl,net"
+      - "--authrpc.addr=0.0.0.0"
+      - "--authrpc.port=9551"
+      - "--http.vhosts=*"
+      - "--authrpc.vhosts=*"
+      - "--authrpc.jwtsecret=/opt/qrl/config/jwtsecret-node3"
+      - "--networkid=${QRL_NETWORK_ID:-32333}"
+      - "--port=31303"
+      - "--ipcdisable"
+      - "--syncmode=full"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --post-data='{\"jsonrpc\":\"2.0\",\"method\":\"qrl_blockNumber\",\"params\":[],\"id\":1}' --header='Content-Type: application/json' http://localhost:9545 | grep -q result"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+
+  gqrl-node4:
+    <<: *common-security
+    build: *gqrl-build
+    container_name: qrl-gqrl-node4
+    networks: [qrl-popup]
+    volumes:
+      - ${QRL_DATA_DIR:-./data}/node4/gqrl:/opt/qrl/data
+      - ${QRL_DATA_DIR:-./data}/node4/keystore:/opt/qrl/keystore
+      - ${QRL_DATA_DIR:-./data}/config:/opt/qrl/config:ro
+    environment:
+      QRL_JWT_SECRET: ${QRL_JWT_SECRET_NODE4}
+    ports:
+      - "127.0.0.1:9548:9545"
+      - "127.0.0.1:9648:9645"
+    command:
+      - "--datadir=/opt/qrl/data"
+      - "--keystore=/opt/qrl/keystore"
+      - "--http"
+      - "--http.addr=0.0.0.0"
+      - "--http.port=9545"
+      - "--http.api=web3,qrl,net,admin,txpool,miner,debug"
+      - "--ws"
+      - "--ws.addr=0.0.0.0"
+      - "--ws.port=9645"
+      - "--ws.api=web3,qrl,net"
+      - "--authrpc.addr=0.0.0.0"
+      - "--authrpc.port=9551"
+      - "--http.vhosts=*"
+      - "--authrpc.vhosts=*"
+      - "--authrpc.jwtsecret=/opt/qrl/config/jwtsecret-node4"
+      - "--networkid=${QRL_NETWORK_ID:-32333}"
+      - "--port=31303"
+      - "--ipcdisable"
+      - "--syncmode=full"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --post-data='{\"jsonrpc\":\"2.0\",\"method\":\"qrl_blockNumber\",\"params\":[],\"id\":1}' --header='Content-Type: application/json' http://localhost:9545 | grep -q result"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+
+  # ----- consensus layer (leader + 3 followers) ---------------------------
+
+  beacon-node1:
+    <<: *common-security
+    build: *qrysm-build
+    container_name: qrl-beacon-node1
+    depends_on:
+      gqrl-node1:
+        condition: service_healthy
+    networks: [qrl-popup]
+    volumes:
+      - ${QRL_DATA_DIR:-./data}/beacon-node1:/opt/qrl/data
+      - ${QRL_DATA_DIR:-./data}/config:/opt/qrl/config:ro
+    ports:
+      - "127.0.0.1:${QRL_CL_GRPC_PORT_BASE:-4100}:4100"
+      - "127.0.0.1:${QRL_CL_REST_PORT_BASE:-3600}:3600"
+    command:
+      - "--datadir=/opt/qrl/data"
+      - "--chain-config-file=/opt/qrl/config/config.yml"
+      - "--genesis-state=/opt/qrl/config/genesis.ssz"
+      - "--execution-endpoint=http://gqrl-node1:9551"
+      - "--jwt-secret=/opt/qrl/config/jwtsecret-node1"
+      - "--contract-deployment-block=0"
+      - "--interop-executiondata-votes"
+      - "--disable-staking-contract-check"
+      - "--minimum-peers-per-subnet=0"
+      - "--min-sync-peers=0"           # leader
+      - "--p2p-static-id"
+      - "--p2p-local-ip=0.0.0.0"
+      - "--p2p-udp-port=13000"
+      - "--p2p-tcp-port=14000"
+      - "--rpc-host=0.0.0.0"
+      - "--grpc-gateway-host=0.0.0.0"
+      - "--monitoring-host=0.0.0.0"
+      - "--grpc-gateway-port=3600"
+      - "--rpc-port=4100"
+      - "--monitoring-port=8180"
+      - "--chain-id=${QRL_CHAIN_ID:-32333}"
+      - "--suggested-fee-recipient=Q00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"
+      - "--accept-terms-of-use"
+      - "--verbosity=${QRL_LOG_LEVEL:-info}"
+      - "--log-format=text"
+    healthcheck:
+      # GET /qrl/v1/node/health returns 200 when the beacon is up +
+      # syncing; 206 when syncing; 503 when down. wget --spider returns
+      # 0 on 2xx/3xx. curl is baked in (needed for the bootstrap-fetcher
+      # role); use it for the -f fail-on-4xx-5xx semantics.
+      test: ["CMD-SHELL", "curl -sf http://localhost:3600/qrl/v1/node/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
+
+  # ----- bootstrap-fetcher (one-shot init) --------------------------------
+  #
+  # Waits for beacon-node1's REST gateway to come up, then curls
+  # /qrl/v1/node/identity, extracts the QNR, and writes it to the
+  # shared `qrl-bootstrap` volume. Exits successfully once written.
+  # The three follower beacons wait for `service_completed_successfully`
+  # so by the time they start their entrypoint wrapper can read the file.
+  #
+  # Reuses the qrl-beacon image (has curl+jq baked in) — no separate
+  # Dockerfile needed. The entrypoint override runs the fetch script
+  # instead of beacon-chain.
+
+  bootstrap-fetcher:
+    <<: *common-security
+    build: *qrysm-build
+    container_name: qrl-bootstrap-fetcher
+    depends_on:
+      beacon-node1:
+        condition: service_healthy
+    networks: [qrl-popup]
+    restart: "no"
+    # Mount at /opt/qrl/bootstrap (not /shared) because the image
+    # pre-creates that path as UID 1000. Named volumes inherit the
+    # ownership of their mountpoint on first attach; /shared would
+    # be created as root and block the rootless writer.
+    volumes:
+      - qrl-bootstrap:/opt/qrl/bootstrap
+    environment:
+      LEADER_BEACON_GATEWAY: http://beacon-node1:3600
+      QNR_OUTPUT: /opt/qrl/bootstrap/leader.qnr
+      MAX_TRIES: "90"
+      SLEEP_SECS: "2"
+    entrypoint: ["/sbin/tini", "-g", "--", "/opt/qrl/bin/fetch-leader-qnr.sh"]
+    command: []
+
+  beacon-node2:
+    <<: *common-security
+    build: *qrysm-build
+    container_name: qrl-beacon-node2
+    depends_on:
+      gqrl-node2:
+        condition: service_healthy
+      beacon-node1:
+        condition: service_healthy
+      bootstrap-fetcher:
+        condition: service_completed_successfully
+    networks: [qrl-popup]
+    volumes:
+      - ${QRL_DATA_DIR:-./data}/beacon-node2:/opt/qrl/data
+      - ${QRL_DATA_DIR:-./data}/config:/opt/qrl/config:ro
+      - qrl-bootstrap:/opt/qrl/bootstrap:ro
+    command:
+      - "--datadir=/opt/qrl/data"
+      - "--chain-config-file=/opt/qrl/config/config.yml"
+      - "--genesis-state=/opt/qrl/config/genesis.ssz"
+      - "--execution-endpoint=http://gqrl-node2:9551"
+      - "--jwt-secret=/opt/qrl/config/jwtsecret-node2"
+      - "--contract-deployment-block=0"
+      - "--interop-executiondata-votes"
+      - "--disable-staking-contract-check"
+      - "--minimum-peers-per-subnet=0"
+      - "--min-sync-peers=1"
+      - "--p2p-static-id"
+      - "--p2p-local-ip=0.0.0.0"
+      - "--p2p-udp-port=13001"
+      - "--p2p-tcp-port=14001"
+      - "--rpc-host=0.0.0.0"
+      - "--grpc-gateway-host=0.0.0.0"
+      - "--monitoring-host=0.0.0.0"
+      - "--grpc-gateway-port=3601"
+      - "--rpc-port=4101"
+      - "--monitoring-port=8181"
+      - "--chain-id=${QRL_CHAIN_ID:-32333}"
+      - "--accept-terms-of-use"
+      - "--verbosity=${QRL_LOG_LEVEL:-info}"
+      - "--log-format=text"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3601/qrl/v1/node/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
+
+  beacon-node3:
+    <<: *common-security
+    build: *qrysm-build
+    container_name: qrl-beacon-node3
+    depends_on:
+      gqrl-node3:
+        condition: service_healthy
+      beacon-node1:
+        condition: service_healthy
+      bootstrap-fetcher:
+        condition: service_completed_successfully
+    networks: [qrl-popup]
+    volumes:
+      - ${QRL_DATA_DIR:-./data}/beacon-node3:/opt/qrl/data
+      - ${QRL_DATA_DIR:-./data}/config:/opt/qrl/config:ro
+      - qrl-bootstrap:/opt/qrl/bootstrap:ro
+    command:
+      - "--datadir=/opt/qrl/data"
+      - "--chain-config-file=/opt/qrl/config/config.yml"
+      - "--genesis-state=/opt/qrl/config/genesis.ssz"
+      - "--execution-endpoint=http://gqrl-node3:9551"
+      - "--jwt-secret=/opt/qrl/config/jwtsecret-node3"
+      - "--contract-deployment-block=0"
+      - "--interop-executiondata-votes"
+      - "--disable-staking-contract-check"
+      - "--minimum-peers-per-subnet=0"
+      - "--min-sync-peers=1"
+      - "--p2p-static-id"
+      - "--p2p-local-ip=0.0.0.0"
+      - "--p2p-udp-port=13002"
+      - "--p2p-tcp-port=14002"
+      - "--rpc-host=0.0.0.0"
+      - "--grpc-gateway-host=0.0.0.0"
+      - "--monitoring-host=0.0.0.0"
+      - "--grpc-gateway-port=3602"
+      - "--rpc-port=4102"
+      - "--monitoring-port=8182"
+      - "--chain-id=${QRL_CHAIN_ID:-32333}"
+      - "--accept-terms-of-use"
+      - "--verbosity=${QRL_LOG_LEVEL:-info}"
+      - "--log-format=text"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3602/qrl/v1/node/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
+
+  beacon-node4:
+    <<: *common-security
+    build: *qrysm-build
+    container_name: qrl-beacon-node4
+    depends_on:
+      gqrl-node4:
+        condition: service_healthy
+      beacon-node1:
+        condition: service_healthy
+      bootstrap-fetcher:
+        condition: service_completed_successfully
+    networks: [qrl-popup]
+    volumes:
+      - ${QRL_DATA_DIR:-./data}/beacon-node4:/opt/qrl/data
+      - ${QRL_DATA_DIR:-./data}/config:/opt/qrl/config:ro
+      - qrl-bootstrap:/opt/qrl/bootstrap:ro
+    command:
+      - "--datadir=/opt/qrl/data"
+      - "--chain-config-file=/opt/qrl/config/config.yml"
+      - "--genesis-state=/opt/qrl/config/genesis.ssz"
+      - "--execution-endpoint=http://gqrl-node4:9551"
+      - "--jwt-secret=/opt/qrl/config/jwtsecret-node4"
+      - "--contract-deployment-block=0"
+      - "--interop-executiondata-votes"
+      - "--disable-staking-contract-check"
+      - "--minimum-peers-per-subnet=0"
+      - "--min-sync-peers=1"
+      - "--p2p-static-id"
+      - "--p2p-local-ip=0.0.0.0"
+      - "--p2p-udp-port=13003"
+      - "--p2p-tcp-port=14003"
+      - "--rpc-host=0.0.0.0"
+      - "--grpc-gateway-host=0.0.0.0"
+      - "--monitoring-host=0.0.0.0"
+      - "--grpc-gateway-port=3603"
+      - "--rpc-port=4103"
+      - "--monitoring-port=8183"
+      - "--chain-id=${QRL_CHAIN_ID:-32333}"
+      - "--accept-terms-of-use"
+      - "--verbosity=${QRL_LOG_LEVEL:-info}"
+      - "--log-format=text"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3603/qrl/v1/node/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
+
+  # ----- validator (single, drives beacon-node1) ---------------------------
+
+  validator:
+    <<: *common-security
+    build:
+      context: ..
+      dockerfile: docker/popup-node/Dockerfile.validator
+    container_name: qrl-validator
+    depends_on:
+      beacon-node1:
+        condition: service_healthy
+    networks: [qrl-popup]
+    volumes:
+      - ${QRL_DATA_DIR:-./data}/validators:/opt/qrl/data
+      - ${QRL_DATA_DIR:-./data}/config:/opt/qrl/config:ro
+    # Validator has no HTTP surface — talks only to its paired beacon
+    # via gRPC. Best proxy for "am I alive": can I TCP-connect to my
+    # beacon's gRPC. Uses busybox nc (netcat) which alpine ships.
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z beacon-node1 4100 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
+
+  # ----- dashboard (status-server) ---------------------------------------
+
+  dashboard:
+    <<: *common-security
+    build:
+      context: ..
+      dockerfile: docker/popup-node/Dockerfile.status-server
+    container_name: qrl-dashboard
+    depends_on:
+      gqrl-node1:
+        condition: service_healthy
+      beacon-node1:
+        condition: service_healthy
+    networks: [qrl-popup]
+    volumes:
+      - ${QRL_DATA_DIR:-./data}/dashboard:/opt/qrl/data
+      # $HOME/.qrl-dashboard holds the wallet keystore ring (Argon2id +
+      # AES-256-GCM per lib/wallet_store.js) and the Unix API socket.
+      # Both need persistence + write access; rootfs is read_only:true
+      # so a bind mount here is the only way. Isolated from the compose
+      # node-data trees so wallets survive `docker compose down -v`.
+      - ${QRL_DATA_DIR:-./data}/dashboard-home:/home/node/.qrl-dashboard
+    environment:
+      # Point the dashboard at the compose-internal DNS names instead of
+      # localhost — otherwise its zond-private proxy tries to reach its
+      # OWN port 9545 (nothing there) instead of the actual gqrl-node1
+      # container. status-server.js reads these three vars.
+      QRL_ZOND_PRIVATE_EXEC_RPC:    http://gqrl-node1:9545
+      QRL_ZOND_PRIVATE_BEACON_RPC:  http://beacon-node1:3600
+      QRL_ZOND_PRIVATE_BEACON_GRPC: beacon-node1:4100
+      # Zeus proxy runs on the HOST (Meteor app on :3737), not in a
+      # container. Route classic-* proxy calls to host.docker.internal.
+      QRL_ZEUS_PROXY_URL:           http://host.docker.internal:3737
+      # Every checkNetwork(...) with no explicit host defaults to
+      # HOST_ALIAS. In a container, that has to be host.docker.internal
+      # or checks hit the container's own loopback.
+      QRL_HOST_ALIAS:               host.docker.internal
+    extra_hosts:
+      # Docker for Mac provides host.docker.internal automatically; on
+      # Linux Docker <20.10 needs this explicit mapping to reach the host.
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${QRL_DASHBOARD_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/api/status || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 60s

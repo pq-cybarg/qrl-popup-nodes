@@ -1,0 +1,100 @@
+# AppArmor profile for the qrysm beacon-chain container.
+#
+# Same posture model as qrl-gqrl. The beacon is a pure
+# read-of-datadir / write-of-beaconchaindata process; no raw sockets,
+# no kernel surface, no mount capability.
+
+#include <tunables/global>
+
+profile qrl-beacon flags=(enforce) {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+  #include <abstractions/openssl>
+
+  deny mount,
+  deny remount,
+  deny umount,
+  deny pivot_root,
+  deny capability sys_module,
+  deny capability sys_rawio,
+  deny capability sys_admin,
+  deny capability sys_ptrace,
+  deny capability sys_boot,
+  deny capability mac_admin,
+  deny capability mac_override,
+  deny @{PROC}/sys/** w,
+  deny /sys/kernel/** w,
+  deny /sys/firmware/** rwx,
+  deny /sys/module/** rwx,
+  deny /dev/mem rwx,
+  deny /dev/kmem rwx,
+  deny /dev/port rwx,
+  deny /dev/kvm rwx,
+  deny ptrace,
+  deny network packet,
+  deny network netlink raw,
+  deny network bluetooth,
+  deny network can,
+
+  /opt/qrl/bin/beacon-chain ixr,
+  /opt/qrl/bin/beacon-entrypoint ixr,
+  /opt/qrl/bin/* ixr,
+  /bin/sh ixr,
+  /bin/busybox ixr,
+  /lib/** r,
+  /lib64/** r,
+  /usr/lib/** r,
+  /usr/local/lib/** r,
+  /etc/ssl/certs/ r,
+  /etc/ssl/certs/** r,
+  /etc/ca-certificates/** r,
+  /etc/nsswitch.conf r,
+  /etc/host.conf r,
+  /etc/hosts r,
+  /etc/resolv.conf r,
+  /etc/passwd r,
+  /etc/group r,
+  /etc/machine-id r,
+  /etc/localtime r,
+  /usr/share/zoneinfo/** r,
+
+  /opt/qrl/data/ rw,
+  /opt/qrl/data/** rwkl,
+  /opt/qrl/config/ r,
+  /opt/qrl/config/** r,
+
+  /tmp/ rw,
+  /tmp/** rwkl,
+  owner /home/qrl/ rw,
+  owner /home/qrl/** rwkl,
+
+  @{PROC}/ r,
+  @{PROC}/sys/net/core/somaxconn r,
+  @{PROC}/sys/kernel/hostname r,
+  @{PROC}/sys/kernel/osrelease r,
+  @{PROC}/sys/kernel/version r,
+  @{PROC}/sys/kernel/random/uuid r,
+  @{PROC}/sys/vm/overcommit_memory r,
+  @{PROC}/sys/vm/max_map_count r,
+  @{PROC}/@{pid}/ r,
+  @{PROC}/@{pid}/** r,
+  @{PROC}/self/ r,
+  @{PROC}/self/** r,
+  @{PROC}/cpuinfo r,
+  @{PROC}/stat r,
+  @{PROC}/meminfo r,
+  @{PROC}/mounts r,
+  @{PROC}/filesystems r,
+  @{PROC}/loadavg r,
+  @{PROC}/uptime r,
+
+  network inet tcp,
+  network inet udp,
+  network inet6 tcp,
+  network inet6 udp,
+  network unix stream,
+  network unix dgram,
+
+  signal (send,receive) peer=qrl-beacon,
+  signal receive peer=unconfined,
+}

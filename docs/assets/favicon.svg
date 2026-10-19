@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3aa0ff"/>
+      <stop offset="50%" stop-color="#b070ff"/>
+      <stop offset="100%" stop-color="#ff5577"/>
+    </linearGradient>
+  </defs>
+  <!-- Hexagonal shield suggesting lattice-based PQ crypto -->
+  <polygon points="32,4 56,18 56,46 32,60 8,46 8,18"
+           fill="none" stroke="url(#g)" stroke-width="3" stroke-linejoin="round"/>
+  <!-- Stylized Q -->
+  <circle cx="32" cy="32" r="12" fill="none" stroke="url(#g)" stroke-width="4"/>
+  <line x1="38" y1="38" x2="46" y2="46" stroke="url(#g)" stroke-width="4" stroke-linecap="round"/>
+</svg>

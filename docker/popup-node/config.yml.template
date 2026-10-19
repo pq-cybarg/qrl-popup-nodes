@@ -1,0 +1,22 @@
+# QRL beacon-chain config.yml — popup-node localnet template.
+#
+# Used by configure.sh to seed ${QRL_DATA_DIR}/config/config.yml on
+# first bring-up. Variables in ${...} shape are substituted from .env
+# by configure.sh via `envsubst`.
+
+CONFIG_NAME: interop
+PRESET_BASE: interop
+
+# Genesis
+GENESIS_FORK_VERSION: 0x20000089
+
+# Time parameters
+SECONDS_PER_SLOT: 60
+SLOTS_PER_EPOCH: 128
+
+# Deposit contract (QRVM-native stub deployed in genesis; see
+# qrl-2.0/configs/localnet/genesis-template.json and commit 550ec55e)
+DEPOSIT_CONTRACT_ADDRESS: Q00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003
+
+# Override for interop network — matches --num-validators=4 in qrysmctl
+MIN_GENESIS_ACTIVE_VALIDATOR_COUNT: 4

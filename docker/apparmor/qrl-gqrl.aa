@@ -1,0 +1,119 @@
+# AppArmor profile for the gqrl (execution-layer) container.
+#
+# Posture: enforce-mode, deny-by-default. Combined with
+#   - read_only: true           (from docker-compose.hardened.yaml)
+#   - cap_drop: [ALL]           (from docker-compose.yaml)
+#   - security_opt: no-new-privileges:true
+# this profile is the AppArmor leg of a three-leg lock-down
+# (seccomp syscall allowlist is the other side).
+#
+# Deny categories (nation-state resistance):
+#   - mount/remount (prevents procfs/sysfs re-mount escape)
+#   - ptrace (prevents cross-container debugger attach)
+#   - capable sys_module / sys_rawio / sys_admin
+#   - raw sockets (PACKET, AF_NETLINK beyond uevent)
+#   - /proc/sys/** writes (kernel param tampering)
+#   - /sys/kernel/** writes
+#   - module load/unload
+#   - execution outside the pinned binary + /tmp
+
+#include <tunables/global>
+
+profile qrl-gqrl flags=(enforce) {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+  #include <abstractions/openssl>
+
+  # ---- deny the nation-state escape surface ----
+  deny mount,
+  deny remount,
+  deny umount,
+  deny pivot_root,
+  deny capability sys_module,
+  deny capability sys_rawio,
+  deny capability sys_admin,
+  deny capability sys_ptrace,
+  deny capability sys_boot,
+  deny capability mac_admin,
+  deny capability mac_override,
+  deny @{PROC}/sys/** w,
+  deny /sys/kernel/** w,
+  deny /sys/firmware/** rwx,
+  deny /sys/module/** rwx,
+  deny /dev/mem rwx,
+  deny /dev/kmem rwx,
+  deny /dev/port rwx,
+  deny /dev/kvm rwx,
+  deny ptrace,
+  deny network packet,
+  deny network netlink raw,
+  deny network bluetooth,
+  deny network can,
+
+  # ---- allow the binary + runtime deps ----
+  /opt/qrl/bin/gqrl ixr,
+  /opt/qrl/bin/* ixr,
+  /lib/** r,
+  /lib64/** r,
+  /usr/lib/** r,
+  /usr/local/lib/** r,
+  /etc/ssl/certs/ r,
+  /etc/ssl/certs/** r,
+  /etc/ca-certificates/** r,
+  /etc/nsswitch.conf r,
+  /etc/host.conf r,
+  /etc/hosts r,
+  /etc/resolv.conf r,
+  /etc/passwd r,
+  /etc/group r,
+  /etc/machine-id r,
+  /etc/localtime r,
+  /usr/share/zoneinfo/** r,
+
+  # ---- allow the datadir + keystore (writable) ----
+  /opt/qrl/data/ rw,
+  /opt/qrl/data/** rwkl,
+  /opt/qrl/keystore/ r,
+  /opt/qrl/keystore/** r,
+  /opt/qrl/config/ r,
+  /opt/qrl/config/** r,
+
+  # ---- scratch space ----
+  /tmp/ rw,
+  /tmp/** rwkl,
+  owner /home/qrl/ rw,
+  owner /home/qrl/** rwkl,
+
+  # ---- read-only proc introspection the Go runtime needs ----
+  @{PROC}/ r,
+  @{PROC}/sys/net/core/somaxconn r,
+  @{PROC}/sys/kernel/hostname r,
+  @{PROC}/sys/kernel/osrelease r,
+  @{PROC}/sys/kernel/version r,
+  @{PROC}/sys/kernel/random/uuid r,
+  @{PROC}/sys/vm/overcommit_memory r,
+  @{PROC}/sys/vm/max_map_count r,
+  @{PROC}/@{pid}/ r,
+  @{PROC}/@{pid}/** r,
+  @{PROC}/self/ r,
+  @{PROC}/self/** r,
+  @{PROC}/cpuinfo r,
+  @{PROC}/stat r,
+  @{PROC}/meminfo r,
+  @{PROC}/mounts r,
+  @{PROC}/filesystems r,
+  @{PROC}/loadavg r,
+  @{PROC}/uptime r,
+
+  # ---- network: TCP+UDP only, no raw ----
+  network inet tcp,
+  network inet udp,
+  network inet6 tcp,
+  network inet6 udp,
+  network unix stream,
+  network unix dgram,
+
+  # ---- signals: send/receive only within own peer group ----
+  signal (send,receive) peer=qrl-gqrl,
+  signal receive peer=unconfined,
+}

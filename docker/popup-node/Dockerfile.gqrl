@@ -1,0 +1,126 @@
+# Rootless-safe gqrl image for popup nodes.
+#
+# Two-stage build:
+#   1. golang:1.25-alpine builder — compiles gqrl from qrl-2.0/upstream/go-qrl
+#      or one of the variants (rescue-edition, moscow-chill) based on the
+#      QRL_VARIANT_PATH build arg.
+#   2. alpine:3.24 runtime — minimal, non-root user, gqrl binary, no shell.
+#      Alpine 3.24 ships OpenSSL 3.5.8 with ML-KEM (FIPS 203) built in —
+#      required for the PQ TLS path on control-plane surfaces (task #82).
+#      needed once running (still has one for exec-into-container debug).
+#
+# The final image runs as UID 1000 (`qrl` user). No CAP_ADD, no
+# `--privileged`, no setuid bits. All popup-node ports are >1024 so we
+# don't need CAP_NET_BIND_SERVICE. See docs/POPUP-NODES-ROOTLESS.md.
+#
+# Build:
+#   docker build \
+#     --build-arg QRL_VARIANT_PATH=qrl-2.0/upstream/go-qrl \
+#     -f docker/popup-node/Dockerfile.gqrl \
+#     -t qrl-gqrl:standard .
+#
+# For a variant:
+#   --build-arg QRL_VARIANT_PATH=qrl-2.0/variants/rescue-edition -t qrl-gqrl:rescue-edition
+#   --build-arg QRL_VARIANT_PATH=qrl-2.0/variants/moscow-chill   -t qrl-gqrl:moscow-chill
+
+# Base images pinned by digest — see docker/BASE-IMAGE-DIGESTS.md for the
+# refresh procedure. Tag-only pulls are supply-chain risk (a compromised
+# upstream repo can silently substitute a malicious image behind the same
+# tag). Refresh via `docker/refresh-base-digests.sh`.
+ARG BUILDER_IMAGE=golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59
+ARG RUNTIME_IMAGE=alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+
+# --- builder stage ------------------------------------------------------------
+
+FROM ${BUILDER_IMAGE} AS builder
+
+# The gqrl build wants a C compiler for cgo bits (secp256k1, keccak asm),
+# musl-dev because we're on Alpine, git for `go run build/ci.go` version
+# stamping.
+RUN apk add --no-cache gcc musl-dev linux-headers git
+
+# Path relative to the repo root — must be qrl-2.0/upstream/go-qrl OR one of
+# qrl-2.0/variants/*. The variant dirs are self-contained forks of go-qrl
+# with extra precompiles (rescue-prime, moscow-chill etc), same layout.
+ARG QRL_VARIANT_PATH=qrl-2.0/upstream/go-qrl
+
+WORKDIR /src
+# Copy only the variant source. This trims the build context in most
+# setups; combine with .dockerignore at the repo root for the full effect.
+COPY ${QRL_VARIANT_PATH}/ /src/
+
+# Cache go modules layer separately from the source: dependencies rarely
+# change between commits. Copy go.mod + go.sum first, download, then the
+# rest gets copied on top and the download step is cache-hit.
+RUN if [ -f go.mod ]; then go mod download; fi
+
+RUN go build -buildvcs=false -trimpath -ldflags="-s -w" -o /out/gqrl ./cmd/gqrl \
+    && ls -la /out/gqrl
+
+# --- runtime stage ------------------------------------------------------------
+#
+# Distroless (gcr.io/distroless/static-debian12:nonroot) would be the
+# strongest choice — no shell, no package manager, minimal syscall
+# surface. It's what phase 2 will move to. For phase 1 we keep Alpine
+# for the small win of having tini prebuilt via `apk` and the smaller
+# initial support burden; the rootless + read-only + no-new-privs
+# combo mitigates the shell-present risk (a shell that can't spawn
+# a privileged process, can't write outside the mounted volume, and
+# whose syscalls are blocked by the container runtime's default seccomp
+# is not the classic post-exploit shell).
+
+FROM ${RUNTIME_IMAGE} AS runtime
+
+# ca-certificates for HTTPS to any external service (e.g. checkpoint sync).
+# tini for proper PID-1 signal handling — gqrl handles SIGTERM but tini
+# gives us a bulletproof reaper for any children.
+RUN apk add --no-cache ca-certificates tini openssl
+
+# Non-root user. UID 1000 is the Linux/macOS convention for "the human"
+# and matches what most bind-mount setups expect. `nologin` shell means
+# even if an attacker gets a way to spawn a login shell, it exits
+# immediately.
+RUN addgroup -g 1000 qrl \
+    && adduser -D -H -u 1000 -G qrl -s /sbin/nologin qrl
+
+# Runtime tree — all under a single owned root so mounts work cleanly.
+# Everything except /opt/qrl/data will be marked read-only by compose's
+# `read_only: true` at runtime.
+RUN mkdir -p /opt/qrl/bin /opt/qrl/data /opt/qrl/keystore /opt/qrl/config \
+    && chown -R 1000:1000 /opt/qrl
+
+COPY --from=builder --chown=1000:1000 /out/gqrl /opt/qrl/bin/gqrl
+
+# Drop setuid/setgid bits from every file. Belt-and-suspenders — nothing
+# we install should have them, but a bad base image or a build-tool
+# artifact could sneak one in.
+RUN find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -exec chmod a-s {} + 2>/dev/null || true
+
+USER 1000:1000
+WORKDIR /opt/qrl
+
+# All ports >1024. No CAP_NET_BIND_SERVICE needed.
+#   9545  HTTP JSON-RPC
+#   9645  WS JSON-RPC
+#   9551  authRPC (engine API, JWT-protected)
+#   31303 P2P TCP + UDP
+EXPOSE 9545 9645 9551 31303/tcp 31303/udp
+
+# tini so ctrl-C from `docker run` and `docker stop`'s SIGTERM cleanly
+# stop gqrl. tini also disables core dumps (no need for a separate
+# RLIMIT_CORE — the compose file also sets ulimits.core.hard=0).
+# `-g` propagates signals to the whole process group.
+ENTRYPOINT ["/sbin/tini", "-g", "--", "/opt/qrl/bin/gqrl"]
+
+# Sensible localnet defaults; override with `docker run ... <flags>` or a
+# compose command:. Data dir and keystore are on the volume tree so a
+# `-v ./data:/opt/qrl/data` bind gets you persistent state.
+CMD ["--datadir=/opt/qrl/data", \
+     "--keystore=/opt/qrl/keystore", \
+     "--http", "--http.addr=0.0.0.0", "--http.port=9545", \
+     "--http.api=web3,qrl,net,admin,txpool,miner,debug", \
+     "--ws", "--ws.addr=0.0.0.0", "--ws.port=9645", "--ws.api=web3,qrl,net", \
+     "--authrpc.addr=0.0.0.0", "--authrpc.port=9551", \
+     "--port=31303", \
+     "--nat=any", \
+     "--syncmode=full"]

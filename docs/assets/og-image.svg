@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a0f1a"/>
+      <stop offset="100%" stop-color="#1a0a2a"/>
+    </linearGradient>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#3aa0ff"/>
+      <stop offset="50%" stop-color="#b070ff"/>
+      <stop offset="100%" stop-color="#ff5577"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <!-- Hexagonal shield -->
+  <polygon points="140,80 240,140 240,260 140,320 40,260 40,140"
+           fill="none" stroke="url(#g)" stroke-width="6" stroke-linejoin="round"
+           transform="translate(60, 155)"/>
+  <!-- Stylized Q at same offset -->
+  <circle cx="200" cy="470" r="50" fill="none" stroke="url(#g)" stroke-width="7"
+          transform="translate(0, -155)"/>
+  <line x1="226" y1="341" x2="258" y2="373" stroke="url(#g)" stroke-width="7" stroke-linecap="round"/>
+  <!-- Title -->
+  <text x="340" y="310" font-family="-apple-system, Helvetica, Arial, sans-serif"
+        font-size="92" font-weight="800" fill="url(#g)" letter-spacing="-3">
+    QRL Popup Nodes
+  </text>
+  <text x="340" y="360" font-family="-apple-system, Helvetica, Arial, sans-serif"
+        font-size="30" fill="#9aa5b1">
+    Rootless · post-quantum · hardened
+  </text>
+  <text x="340" y="400" font-family="-apple-system, Helvetica, Arial, sans-serif"
+        font-size="26" fill="#6b7684">
+    gqrl + qrysm + validator + dashboard · three variants side-by-side
+  </text>
+  <!-- Stack chips -->
+  <g font-family="monospace" font-size="22" font-weight="700" letter-spacing="2">
+    <rect x="340" y="470" rx="8" ry="8" width="130" height="42" fill="none" stroke="#3aa0ff" stroke-width="2"/>
+    <text x="360" y="498" fill="#3aa0ff">LEAD</text>
+    <rect x="490" y="470" rx="8" ry="8" width="110" height="42" fill="none" stroke="#ff5577" stroke-width="2"/>
+    <text x="528" y="498" fill="#ff5577">L2</text>
+    <rect x="620" y="470" rx="8" ry="8" width="110" height="42" fill="none" stroke="#b070ff" stroke-width="2"/>
+    <text x="653" y="498" fill="#b070ff">MC</text>
+  </g>
+</svg>

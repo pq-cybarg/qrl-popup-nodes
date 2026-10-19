@@ -1,0 +1,54 @@
+# Operator-local — never commit
+docker/data/
+docker/data-l2-*/
+docker/snapshots/
+docker/out/
+docker/logs/
+docker/tls/
+docker/.env
+docker/.env.*
+*.env
+*.env.*
+
+# Build artifacts
+qrl-2.0/upstream/
+qrl-2.0/variants/*/build/
+qrl-2.0/variants/*/gzond
+qrl-2.0/variants/*/.git/
+qrl-2.0/variants/*/go-qrl/
+qrl-2.0/variants/*/qrl-web3-wallet/
+
+# Secrets / state
+*.pem
+*.key
+*.key.*
+jwtsecret*
+seed.*
+wallet*.json
+validator.db
+
+# Node + Jekyll
+node_modules/
+_site/
+.sass-cache/
+.jekyll-cache/
+.jekyll-metadata
+Gemfile.lock
+vendor/
+
+# macOS
+.DS_Store
+._*
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Chain snapshots backup folder patterns
+*backup*/
+*.pre-*
+*.bak
+*.old

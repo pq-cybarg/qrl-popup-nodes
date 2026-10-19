@@ -1,0 +1,14 @@
+source "https://rubygems.org"
+
+# GitHub Pages gem — pins Jekyll + plugins to the versions GH Pages
+# runs. Keep this file in sync with
+# https://pages.github.com/versions/ when upgrading.
+gem "github-pages", group: :jekyll_plugins
+
+group :jekyll_plugins do
+  gem "jekyll-remote-theme"
+  gem "jekyll-seo-tag"
+  gem "jekyll-sitemap"
+  gem "jekyll-github-metadata"
+  gem "just-the-docs"
+end

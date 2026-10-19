@@ -1,0 +1,304 @@
+// Copyright 2015 The go-ethereum Authors
+// This file is part of the go-ethereum library.
+//
+// The go-ethereum library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Lesser General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The go-ethereum library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public License
+// along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
+
+package core
+
+import (
+	"math/big"
+	"testing"
+
+	"github.com/theQRL/go-qrl/common"
+	"github.com/theQRL/go-qrl/common/math"
+	"github.com/theQRL/go-qrl/consensus/beacon"
+	"github.com/theQRL/go-qrl/core/rawdb"
+	"github.com/theQRL/go-qrl/core/types"
+	"github.com/theQRL/go-qrl/core/vm"
+	"github.com/theQRL/go-qrl/crypto/pqcrypto/wallet"
+	"github.com/theQRL/go-qrl/internal/testutil"
+	"github.com/theQRL/go-qrl/params"
+	"github.com/theQRL/go-qrl/qrldb"
+)
+
+func BenchmarkInsertChain_empty_memdb(b *testing.B) {
+	benchInsertChain(b, false, nil)
+}
+func BenchmarkInsertChain_empty_diskdb(b *testing.B) {
+	benchInsertChain(b, true, nil)
+}
+func BenchmarkInsertChain_valueTx_memdb(b *testing.B) {
+	benchInsertChain(b, false, genValueTx(0))
+}
+func BenchmarkInsertChain_valueTx_diskdb(b *testing.B) {
+	benchInsertChain(b, true, genValueTx(0))
+}
+func BenchmarkInsertChain_valueTx_100kB_memdb(b *testing.B) {
+	benchInsertChain(b, false, genValueTx(100*1024))
+}
+func BenchmarkInsertChain_valueTx_100kB_diskdb(b *testing.B) {
+	benchInsertChain(b, true, genValueTx(100*1024))
+}
+func BenchmarkInsertChain_ring200_memdb(b *testing.B) {
+	benchInsertChain(b, false, genTxRing(200))
+}
+func BenchmarkInsertChain_ring200_diskdb(b *testing.B) {
+	benchInsertChain(b, true, genTxRing(200))
+}
+func BenchmarkInsertChain_ring1000_memdb(b *testing.B) {
+	benchInsertChain(b, false, genTxRing(1000))
+}
+func BenchmarkInsertChain_ring1000_diskdb(b *testing.B) {
+	benchInsertChain(b, true, genTxRing(1000))
+}
+
+var (
+	// This is the content of the genesis block used by the benchmarks.
+	benchRootWallet = testutil.MustLoadAccount("alice").MustWallet()
+	benchRootAddr   = common.Address(benchRootWallet.GetAddress())
+	benchRootFunds  = math.BigPow(2, 200)
+)
+
+// genValueTx returns a block generator that includes a single
+// value-transfer transaction with n bytes of extra data in each
+// block.
+func genValueTx(nbytes int) func(int, *BlockGen) {
+	return func(i int, gen *BlockGen) {
+		toaddr := common.Address{}
+		data := make([]byte, nbytes)
+		gas, _ := IntrinsicGas(data, nil, false)
+		signer := types.MakeSigner(gen.config)
+		baseFee := big.NewInt(0)
+		if gen.header.BaseFee != nil {
+			baseFee = gen.header.BaseFee
+		}
+		tx, _ := types.SignNewTx(benchRootWallet, signer, &types.DynamicFeeTx{
+			Nonce:     gen.TxNonce(benchRootAddr),
+			To:        &toaddr,
+			Value:     big.NewInt(1),
+			Gas:       gas,
+			Data:      data,
+			GasFeeCap: baseFee,
+		})
+		gen.AddTx(tx)
+	}
+}
+
+var (
+	ringWallets = make([]wallet.Wallet, 1000)
+	ringAddrs   = make([]common.Address, len(ringWallets))
+)
+
+func init() {
+	ringWallets[0] = benchRootWallet
+	ringAddrs[0] = benchRootAddr
+	for i := 1; i < len(ringWallets); i++ {
+		ringWallets[i], _ = wallet.Generate(wallet.ML_DSA_87)
+		ringAddrs[i] = ringWallets[i].GetAddress()
+	}
+}
+
+// genTxRing returns a block generator that sends quanta in a ring
+// among n accounts. This is creates n entries in the state database
+// and fills the blocks with many small transactions.
+func genTxRing(naccounts int) func(int, *BlockGen) {
+	from := 0
+	availableFunds := new(big.Int).Set(benchRootFunds)
+	return func(i int, gen *BlockGen) {
+		block := gen.PrevBlock(i - 1)
+		gas := block.GasLimit()
+		baseFee := big.NewInt(0)
+		if gen.header.BaseFee != nil {
+			baseFee = gen.header.BaseFee
+		}
+		signer := types.MakeSigner(gen.config)
+		for {
+			gas -= params.TxGas
+			if gas < params.TxGas {
+				break
+			}
+			to := (from + 1) % naccounts
+			burn := new(big.Int).SetUint64(params.TxGas)
+			burn.Mul(burn, gen.header.BaseFee)
+			availableFunds.Sub(availableFunds, burn)
+			if availableFunds.Cmp(big.NewInt(1)) < 0 {
+				panic("not enough funds")
+			}
+			tx, err := types.SignNewTx(ringWallets[from], signer,
+				&types.DynamicFeeTx{
+					Nonce:     gen.TxNonce(ringAddrs[from]),
+					To:        &ringAddrs[to],
+					Value:     availableFunds,
+					Gas:       params.TxGas,
+					GasFeeCap: baseFee,
+				})
+			if err != nil {
+				panic(err)
+			}
+			gen.AddTx(tx)
+			from = to
+		}
+	}
+}
+
+func benchInsertChain(b *testing.B, disk bool, gen func(int, *BlockGen)) {
+	// Create the database in memory or in a temporary directory.
+	var db qrldb.Database
+	var err error
+	if !disk {
+		db = rawdb.NewMemoryDatabase()
+	} else {
+		dir := b.TempDir()
+		db, err = rawdb.NewLevelDBDatabase(dir, 128, 128, "", false)
+		if err != nil {
+			b.Fatalf("cannot create temporary database: %v", err)
+		}
+		defer db.Close()
+	}
+
+	// Generate a chain of b.N blocks using the supplied block
+	// generator function.
+	gspec := &Genesis{
+		Config: params.TestChainConfig,
+		Alloc:  GenesisAlloc{benchRootAddr: {Balance: benchRootFunds}},
+	}
+	_, chain, _ := GenerateChainWithGenesis(gspec, beacon.NewFaker(), b.N, gen)
+
+	// Time the insertion of the new chain.
+	// State and blocks are stored in the same DB.
+	chainman, _ := NewBlockChain(db, nil, gspec, beacon.NewFaker(), vm.Config{}, nil)
+	defer chainman.Stop()
+	b.ReportAllocs()
+	b.ResetTimer()
+	if i, err := chainman.InsertChain(chain); err != nil {
+		b.Fatalf("insert error (block %d): %v\n", i, err)
+	}
+}
+
+func BenchmarkChainRead_header_10k(b *testing.B) {
+	benchReadChain(b, false, 10000)
+}
+func BenchmarkChainRead_full_10k(b *testing.B) {
+	benchReadChain(b, true, 10000)
+}
+func BenchmarkChainRead_header_100k(b *testing.B) {
+	benchReadChain(b, false, 100000)
+}
+func BenchmarkChainRead_full_100k(b *testing.B) {
+	benchReadChain(b, true, 100000)
+}
+func BenchmarkChainRead_header_500k(b *testing.B) {
+	benchReadChain(b, false, 500000)
+}
+func BenchmarkChainRead_full_500k(b *testing.B) {
+	benchReadChain(b, true, 500000)
+}
+func BenchmarkChainWrite_header_10k(b *testing.B) {
+	benchWriteChain(b, false, 10000)
+}
+func BenchmarkChainWrite_full_10k(b *testing.B) {
+	benchWriteChain(b, true, 10000)
+}
+func BenchmarkChainWrite_header_100k(b *testing.B) {
+	benchWriteChain(b, false, 100000)
+}
+func BenchmarkChainWrite_full_100k(b *testing.B) {
+	benchWriteChain(b, true, 100000)
+}
+func BenchmarkChainWrite_header_500k(b *testing.B) {
+	benchWriteChain(b, false, 500000)
+}
+func BenchmarkChainWrite_full_500k(b *testing.B) {
+	benchWriteChain(b, true, 500000)
+}
+
+// makeChainForBench writes a given number of headers or empty blocks/receipts
+// into a database.
+func makeChainForBench(db qrldb.Database, full bool, count uint64) {
+	var hash common.Hash
+	for n := range count {
+		header := &types.Header{
+			Coinbase:    common.Address{},
+			Number:      big.NewInt(int64(n)),
+			ParentHash:  hash,
+			TxHash:      types.EmptyTxsHash,
+			ReceiptHash: types.EmptyReceiptsHash,
+		}
+		hash = header.Hash()
+
+		rawdb.WriteHeader(db, header)
+		rawdb.WriteCanonicalHash(db, hash, n)
+
+		if n == 0 {
+			rawdb.WriteChainConfig(db, hash, params.AllBeaconProtocolChanges)
+		}
+		rawdb.WriteHeadHeaderHash(db, hash)
+
+		if full || n == 0 {
+			block := types.NewBlockWithHeader(header)
+			rawdb.WriteBody(db, hash, n, block.Body())
+			rawdb.WriteReceipts(db, hash, n, nil)
+			rawdb.WriteHeadBlockHash(db, hash)
+		}
+	}
+}
+
+func benchWriteChain(b *testing.B, full bool, count uint64) {
+	for b.Loop() {
+		dir := b.TempDir()
+		db, err := rawdb.NewLevelDBDatabase(dir, 128, 1024, "", false)
+		if err != nil {
+			b.Fatalf("error opening database at %v: %v", dir, err)
+		}
+		makeChainForBench(db, full, count)
+		db.Close()
+	}
+}
+
+func benchReadChain(b *testing.B, full bool, count uint64) {
+	dir := b.TempDir()
+
+	db, err := rawdb.NewLevelDBDatabase(dir, 128, 1024, "", false)
+	if err != nil {
+		b.Fatalf("error opening database at %v: %v", dir, err)
+	}
+	makeChainForBench(db, full, count)
+	db.Close()
+	cacheConfig := *defaultCacheConfig
+	cacheConfig.TrieDirtyDisabled = true
+
+	b.ReportAllocs()
+
+	for b.Loop() {
+		db, err := rawdb.NewLevelDBDatabase(dir, 128, 1024, "", false)
+		if err != nil {
+			b.Fatalf("error opening database at %v: %v", dir, err)
+		}
+		chain, err := NewBlockChain(db, &cacheConfig, nil, beacon.NewFaker(), vm.Config{}, nil)
+		if err != nil {
+			b.Fatalf("error creating chain: %v", err)
+		}
+
+		for n := range count {
+			header := chain.GetHeaderByNumber(n)
+			if full {
+				hash := header.Hash()
+				rawdb.ReadBody(db, hash, n)
+				rawdb.ReadReceipts(db, hash, n, header.Time, chain.Config())
+			}
+		}
+		chain.Stop()
+		db.Close()
+	}
+}

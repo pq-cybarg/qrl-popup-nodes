@@ -1,0 +1,77 @@
+# Rootless-podman overlay for docker-compose.yaml.
+#
+# Use with:
+#   podman-compose -f docker-compose.yaml -f docker-compose.podman.yaml up
+# or
+#   podman compose -f docker-compose.yaml -f docker-compose.podman.yaml up
+#
+# ---------- what this overlay does --------------------------------------------
+#
+# Rootless podman runs each container in a user namespace where container
+# UID 0 maps to the operator's UID on the host. Container UID 1000 (the
+# `qrl` user baked into every image) would otherwise map to
+# (subuid_start + 999) — a UID with no ownership over `docker/data`,
+# breaking bind-mount writes.
+#
+# `userns_mode: keep-id` remaps the operator's host UID to UID 1000
+# INSIDE the container, so:
+#   - the container process still runs as the "qrl" user (UID 1000)
+#   - files it creates on bind-mounts show up owned by the operator on host
+#   - no setuid dance, no `podman unshare chown` incantations needed
+#
+# The stock docker-compose.yaml sets `user: "1000:1000"` explicitly; that
+# combines with keep-id here without conflict because keep-id maps the
+# operator to 1000 exactly. If your host UID is not 1000, keep-id with
+# `uid=1000,gid=1000` still does the right thing.
+#
+# ---------- what this overlay does NOT change ---------------------------------
+#
+# - Network isolation: podman uses netavark, not the docker bridge driver,
+#   so `com.docker.network.bridge.enable_icc` etc. in the base file are
+#   silently ignored under podman. Behavior is equivalent — netavark
+#   provides service-name DNS and inter-container isolation by default.
+# - Named volume ownership: podman named volumes inherit the mountpoint's
+#   ownership on first attach, same as docker. `qrl-bootstrap` mounted at
+#   `/opt/qrl/bootstrap` (pre-created UID 1000 in the beacon image) works
+#   under both engines.
+# - Port publish syntax `127.0.0.1:HOST:CONTAINER` is honored by both.
+# - `read_only`, `security_opt: no-new-privileges`, `cap_drop: ALL`,
+#   `ulimits.core.hard: 0` — all supported natively in rootless podman.
+#
+# ---------- Linux-only overlay ------------------------------------------------
+#
+# This overlay assumes rootless podman on Linux. On macOS podman runs
+# inside a Linux VM (podman machine), where the machine's default user
+# has UID 501 by default and keep-id still does the right thing (maps
+# host user 501 → container 1000). If you're on macOS, ensure
+# `podman machine init` and `podman machine start` completed cleanly
+# before invoking compose.
+
+services:
+
+  gqrl-node1:
+    userns_mode: "keep-id:uid=1000,gid=1000"
+  gqrl-node2:
+    userns_mode: "keep-id:uid=1000,gid=1000"
+  gqrl-node3:
+    userns_mode: "keep-id:uid=1000,gid=1000"
+  gqrl-node4:
+    userns_mode: "keep-id:uid=1000,gid=1000"
+
+  beacon-node1:
+    userns_mode: "keep-id:uid=1000,gid=1000"
+  beacon-node2:
+    userns_mode: "keep-id:uid=1000,gid=1000"
+  beacon-node3:
+    userns_mode: "keep-id:uid=1000,gid=1000"
+  beacon-node4:
+    userns_mode: "keep-id:uid=1000,gid=1000"
+
+  bootstrap-fetcher:
+    userns_mode: "keep-id:uid=1000,gid=1000"
+
+  validator:
+    userns_mode: "keep-id:uid=1000,gid=1000"
+
+  dashboard:
+    userns_mode: "keep-id:uid=1000,gid=1000"

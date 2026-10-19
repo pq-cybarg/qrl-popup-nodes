@@ -1,0 +1,111 @@
+# AppArmor profile for the status-server (Node.js) dashboard.
+#
+# The dashboard is the most permissive of the four — it needs to
+# fork `docker` + `osascript`/`zenity`, read /proc for self-report,
+# and (optionally) read-only /var/run/docker.sock. Still denies the
+# kernel-surface escape vectors.
+
+#include <tunables/global>
+
+profile qrl-dashboard flags=(enforce) {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+  #include <abstractions/openssl>
+
+  deny mount,
+  deny remount,
+  deny umount,
+  deny pivot_root,
+  deny capability sys_module,
+  deny capability sys_rawio,
+  deny capability sys_admin,
+  deny capability sys_ptrace,
+  deny capability sys_boot,
+  deny capability mac_admin,
+  deny capability mac_override,
+  deny @{PROC}/sys/** w,
+  deny /sys/kernel/** w,
+  deny /sys/firmware/** rwx,
+  deny /sys/module/** rwx,
+  deny /dev/mem rwx,
+  deny /dev/kmem rwx,
+  deny /dev/port rwx,
+  deny /dev/kvm rwx,
+  deny ptrace,
+  deny network packet,
+  deny network netlink raw,
+  deny network bluetooth,
+  deny network can,
+
+  /usr/bin/node ixr,
+  /usr/local/bin/node ixr,
+  /opt/qrl/bin/mldsa87keygen ixr,
+  /opt/qrl/bin/* ixr,
+  /bin/sh ixr,
+  /bin/busybox ixr,
+  /usr/bin/dash ixr,
+  /lib/** r,
+  /lib64/** r,
+  /usr/lib/** r,
+  /usr/local/lib/** r,
+  /etc/ssl/certs/ r,
+  /etc/ssl/certs/** r,
+  /etc/ca-certificates/** r,
+  /etc/nsswitch.conf r,
+  /etc/host.conf r,
+  /etc/hosts r,
+  /etc/resolv.conf r,
+  /etc/passwd r,
+  /etc/group r,
+  /etc/machine-id r,
+  /etc/localtime r,
+  /usr/share/zoneinfo/** r,
+
+  /opt/qrl/app/ r,
+  /opt/qrl/app/** r,
+  /opt/qrl/data/ rw,
+  /opt/qrl/data/** rwkl,
+  /opt/qrl/config/ r,
+  /opt/qrl/config/** r,
+  /opt/qrl/repo/ r,
+  /opt/qrl/repo/** r,
+
+  # mounted docker socket (read + write for /compose actions,
+  # restricted to the socket path only)
+  /var/run/docker.sock rw,
+
+  /tmp/ rw,
+  /tmp/** rwkl,
+  owner /home/node/ rw,
+  owner /home/node/** rwkl,
+
+  @{PROC}/ r,
+  @{PROC}/sys/net/core/somaxconn r,
+  @{PROC}/sys/kernel/hostname r,
+  @{PROC}/sys/kernel/osrelease r,
+  @{PROC}/sys/kernel/version r,
+  @{PROC}/sys/kernel/random/uuid r,
+  @{PROC}/sys/vm/overcommit_memory r,
+  @{PROC}/sys/vm/max_map_count r,
+  @{PROC}/@{pid}/ r,
+  @{PROC}/@{pid}/** r,
+  @{PROC}/self/ r,
+  @{PROC}/self/** r,
+  @{PROC}/cpuinfo r,
+  @{PROC}/stat r,
+  @{PROC}/meminfo r,
+  @{PROC}/mounts r,
+  @{PROC}/filesystems r,
+  @{PROC}/loadavg r,
+  @{PROC}/uptime r,
+
+  network inet tcp,
+  network inet udp,
+  network inet6 tcp,
+  network inet6 udp,
+  network unix stream,
+  network unix dgram,
+
+  signal (send,receive) peer=qrl-dashboard,
+  signal receive peer=unconfined,
+}

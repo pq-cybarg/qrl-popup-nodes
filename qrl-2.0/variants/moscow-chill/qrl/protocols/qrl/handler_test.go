@@ -1,0 +1,728 @@
+// Copyright 2020 The go-ethereum Authors
+// This file is part of the go-ethereum library.
+//
+// The go-ethereum library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Lesser General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The go-ethereum library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public License
+// along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
+
+package qrl
+
+import (
+	"math"
+	"math/big"
+	"math/rand"
+	"testing"
+
+	"github.com/theQRL/go-qrl/common"
+	"github.com/theQRL/go-qrl/consensus"
+	"github.com/theQRL/go-qrl/consensus/beacon"
+	"github.com/theQRL/go-qrl/core"
+	"github.com/theQRL/go-qrl/core/rawdb"
+	"github.com/theQRL/go-qrl/core/txpool"
+	"github.com/theQRL/go-qrl/core/txpool/legacypool"
+	"github.com/theQRL/go-qrl/core/types"
+	"github.com/theQRL/go-qrl/core/vm"
+	"github.com/theQRL/go-qrl/p2p"
+	"github.com/theQRL/go-qrl/p2p/qnode"
+	"github.com/theQRL/go-qrl/params"
+	"github.com/theQRL/go-qrl/qrldb"
+	"github.com/theQRL/go-qrl/internal/testutil"
+)
+
+var (
+	// testWallet is a wallet to use for funding a tester account.
+	testWallet = testutil.MustLoadAccount("alice").MustWallet()
+
+	// testAddr is the QRL address of the tester account.
+	testAddr = testWallet.GetAddress()
+)
+
+// testBackend is a mock implementation of the live QRL message handler. Its
+// purpose is to allow testing the request/reply workflows and wire serialization
+// in the `qrl` protocol without actually doing any data processing.
+type testBackend struct {
+	db     qrldb.Database
+	chain  *core.BlockChain
+	txpool *txpool.TxPool
+}
+
+// newTestBackend creates an empty chain and wraps it into a mock backend.
+func newTestBackend(blocks int) *testBackend {
+	return newTestBackendWithGenerator(blocks, nil)
+}
+
+// newTestBackendWithGenerator creates a chain with a number of explicitly defined blocks and
+// wraps it into a mock backend.
+func newTestBackendWithGenerator(blocks int, generator func(int, *core.BlockGen)) *testBackend {
+	var (
+		// Create a database pre-initialize with a genesis block
+		db                      = rawdb.NewMemoryDatabase()
+		config                  = params.TestChainConfig
+		engine consensus.Engine = beacon.NewFaker()
+	)
+
+	gspec := &core.Genesis{
+		Config: config,
+		Alloc:  core.GenesisAlloc{testAddr: {Balance: big.NewInt(100_000_000_000_000_000)}},
+	}
+	chain, _ := core.NewBlockChain(db, nil, gspec, engine, vm.Config{}, nil)
+
+	_, bs, _ := core.GenerateChainWithGenesis(gspec, engine, blocks, generator)
+	if _, err := chain.InsertChain(bs); err != nil {
+		panic(err)
+	}
+	for _, block := range bs {
+		chain.TrieDB().Commit(block.Root(), false)
+	}
+	txconfig := legacypool.DefaultConfig
+	txconfig.Journal = "" // Don't litter the disk with test journals
+
+	pool := legacypool.New(txconfig, chain)
+	txpool, _ := txpool.New(new(big.Int).SetUint64(txconfig.PriceLimit), chain, []txpool.SubPool{pool})
+
+	return &testBackend{
+		db:     db,
+		chain:  chain,
+		txpool: txpool,
+	}
+}
+
+// close tears down the transaction pool and chain behind the mock backend.
+func (b *testBackend) close() {
+	b.txpool.Close()
+	b.chain.Stop()
+}
+
+func (b *testBackend) Chain() *core.BlockChain { return b.chain }
+func (b *testBackend) TxPool() TxPool          { return b.txpool }
+
+func (b *testBackend) RunPeer(peer *Peer, handler Handler) error {
+	// Normally the backend would do peer maintenance and handshakes. All that
+	// is omitted and we will just give control back to the handler.
+	return handler(peer)
+}
+func (b *testBackend) PeerInfo(qnode.ID) any { panic("not implemented") }
+
+func (b *testBackend) AcceptTxs() bool {
+	panic("data processing tests should be done in the handler package")
+}
+func (b *testBackend) Handle(*Peer, Packet) error {
+	panic("data processing tests should be done in the handler package")
+}
+
+// Tests that block headers can be retrieved from a remote chain based on user queries.
+func TestGetBlockHeaders1(t *testing.T) { testGetBlockHeaders(t, QRL1) }
+
+func testGetBlockHeaders(t *testing.T, protocol uint) {
+	t.Parallel()
+
+	backend := newTestBackend(maxHeadersServe + 15)
+	defer backend.close()
+
+	peer, _ := newTestPeer("peer", protocol, backend)
+	defer peer.close()
+
+	// Create a "random" unknown hash for testing
+	var unknown common.Hash
+	for i := range unknown {
+		unknown[i] = byte(i)
+	}
+	getHashes := func(from, limit uint64) (hashes []common.Hash) {
+		for i := range limit {
+			hashes = append(hashes, backend.chain.GetCanonicalHash(from-1-i))
+		}
+		return hashes
+	}
+	// Create a batch of tests for various scenarios
+	limit := uint64(maxHeadersServe)
+	tests := []struct {
+		query  *GetBlockHeadersRequest // The query to execute for header retrieval
+		expect []common.Hash           // The hashes of the block whose headers are expected
+	}{
+		// A single random block should be retrievable by hash
+		{
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Hash: backend.chain.GetBlockByNumber(limit / 2).Hash()}, Amount: 1},
+			[]common.Hash{backend.chain.GetBlockByNumber(limit / 2).Hash()},
+		},
+		// A single random block should be retrievable by number
+		{
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Number: limit / 2}, Amount: 1},
+			[]common.Hash{backend.chain.GetBlockByNumber(limit / 2).Hash()},
+		},
+		// Multiple headers should be retrievable in both directions
+		{
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Number: limit / 2}, Amount: 3},
+			[]common.Hash{
+				backend.chain.GetBlockByNumber(limit / 2).Hash(),
+				backend.chain.GetBlockByNumber(limit/2 + 1).Hash(),
+				backend.chain.GetBlockByNumber(limit/2 + 2).Hash(),
+			},
+		}, {
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Number: limit / 2}, Amount: 3, Reverse: true},
+			[]common.Hash{
+				backend.chain.GetBlockByNumber(limit / 2).Hash(),
+				backend.chain.GetBlockByNumber(limit/2 - 1).Hash(),
+				backend.chain.GetBlockByNumber(limit/2 - 2).Hash(),
+			},
+		},
+		// Multiple headers with skip lists should be retrievable
+		{
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Number: limit / 2}, Skip: 3, Amount: 3},
+			[]common.Hash{
+				backend.chain.GetBlockByNumber(limit / 2).Hash(),
+				backend.chain.GetBlockByNumber(limit/2 + 4).Hash(),
+				backend.chain.GetBlockByNumber(limit/2 + 8).Hash(),
+			},
+		}, {
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Number: limit / 2}, Skip: 3, Amount: 3, Reverse: true},
+			[]common.Hash{
+				backend.chain.GetBlockByNumber(limit / 2).Hash(),
+				backend.chain.GetBlockByNumber(limit/2 - 4).Hash(),
+				backend.chain.GetBlockByNumber(limit/2 - 8).Hash(),
+			},
+		},
+		// The chain endpoints should be retrievable
+		{
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Number: 0}, Amount: 1},
+			[]common.Hash{backend.chain.GetBlockByNumber(0).Hash()},
+		},
+		{
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Number: backend.chain.CurrentBlock().Number.Uint64()}, Amount: 1},
+			[]common.Hash{backend.chain.CurrentBlock().Hash()},
+		},
+		{ // If the peer requests a bit into the future, we deliver what we have
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Number: backend.chain.CurrentBlock().Number.Uint64()}, Amount: 10},
+			[]common.Hash{backend.chain.CurrentBlock().Hash()},
+		},
+		// Ensure protocol limits are honored
+		{
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Number: backend.chain.CurrentBlock().Number.Uint64() - 1}, Amount: limit + 10, Reverse: true},
+			getHashes(backend.chain.CurrentBlock().Number.Uint64(), limit),
+		},
+		// Check that requesting more than available is handled gracefully
+		{
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Number: backend.chain.CurrentBlock().Number.Uint64() - 4}, Skip: 3, Amount: 3},
+			[]common.Hash{
+				backend.chain.GetBlockByNumber(backend.chain.CurrentBlock().Number.Uint64() - 4).Hash(),
+				backend.chain.GetBlockByNumber(backend.chain.CurrentBlock().Number.Uint64()).Hash(),
+			},
+		}, {
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Number: 4}, Skip: 3, Amount: 3, Reverse: true},
+			[]common.Hash{
+				backend.chain.GetBlockByNumber(4).Hash(),
+				backend.chain.GetBlockByNumber(0).Hash(),
+			},
+		},
+		// Check that requesting more than available is handled gracefully, even if mid skip
+		{
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Number: backend.chain.CurrentBlock().Number.Uint64() - 4}, Skip: 2, Amount: 3},
+			[]common.Hash{
+				backend.chain.GetBlockByNumber(backend.chain.CurrentBlock().Number.Uint64() - 4).Hash(),
+				backend.chain.GetBlockByNumber(backend.chain.CurrentBlock().Number.Uint64() - 1).Hash(),
+			},
+		}, {
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Number: 4}, Skip: 2, Amount: 3, Reverse: true},
+			[]common.Hash{
+				backend.chain.GetBlockByNumber(4).Hash(),
+				backend.chain.GetBlockByNumber(1).Hash(),
+			},
+		},
+		// Check a corner case where requesting more can iterate past the endpoints
+		{
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Number: 2}, Amount: 5, Reverse: true},
+			[]common.Hash{
+				backend.chain.GetBlockByNumber(2).Hash(),
+				backend.chain.GetBlockByNumber(1).Hash(),
+				backend.chain.GetBlockByNumber(0).Hash(),
+			},
+		},
+		// Check a corner case where skipping overflow loops back into the chain start
+		{
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Hash: backend.chain.GetBlockByNumber(3).Hash()}, Amount: 2, Reverse: false, Skip: math.MaxUint64 - 1},
+			[]common.Hash{
+				backend.chain.GetBlockByNumber(3).Hash(),
+			},
+		},
+		// Check a corner case where skipping overflow loops back to the same header
+		{
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Hash: backend.chain.GetBlockByNumber(1).Hash()}, Amount: 2, Reverse: false, Skip: math.MaxUint64},
+			[]common.Hash{
+				backend.chain.GetBlockByNumber(1).Hash(),
+			},
+		},
+		// Check number-based traversal stops on forward overflow instead of wrapping
+		{
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Number: 3}, Amount: 2, Reverse: false, Skip: math.MaxUint64 - 1},
+			[]common.Hash{
+				backend.chain.GetBlockByNumber(3).Hash(),
+			},
+		},
+		// Check number-based traversal stops on forward zero-progress instead of repeating
+		{
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Number: 3}, Amount: 2, Reverse: false, Skip: math.MaxUint64},
+			[]common.Hash{
+				backend.chain.GetBlockByNumber(3).Hash(),
+			},
+		},
+		// Check number-based traversal stops on reverse zero-progress instead of repeating
+		{
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Number: 3}, Amount: 2, Reverse: true, Skip: math.MaxUint64},
+			[]common.Hash{
+				backend.chain.GetBlockByNumber(3).Hash(),
+			},
+		},
+		// Check that non existing headers aren't returned
+		{
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Hash: unknown}, Amount: 1},
+			[]common.Hash{},
+		}, {
+			&GetBlockHeadersRequest{Origin: HashOrNumber{Number: backend.chain.CurrentBlock().Number.Uint64() + 1}, Amount: 1},
+			[]common.Hash{},
+		},
+	}
+	// Run each of the tests and verify the results against the chain
+	for i, tt := range tests {
+		// Collect the headers to expect in the response
+		var headers []*types.Header
+		for _, hash := range tt.expect {
+			headers = append(headers, backend.chain.GetBlockByHash(hash).Header())
+		}
+		// Send the hash request and verify the response
+		p2p.Send(peer.app, GetBlockHeadersMsg, &GetBlockHeadersPacket{
+			RequestId:              123,
+			GetBlockHeadersRequest: tt.query,
+		})
+		if err := p2p.ExpectMsg(peer.app, BlockHeadersMsg, &BlockHeadersPacket{
+			RequestId:           123,
+			BlockHeadersRequest: headers,
+		}); err != nil {
+			t.Errorf("test %d: headers mismatch: %v", i, err)
+		}
+		// If the test used number origins, repeat with hashes as the too
+		if tt.query.Origin.Hash == (common.Hash{}) {
+			if origin := backend.chain.GetBlockByNumber(tt.query.Origin.Number); origin != nil {
+				tt.query.Origin.Hash, tt.query.Origin.Number = origin.Hash(), 0
+
+				p2p.Send(peer.app, GetBlockHeadersMsg, &GetBlockHeadersPacket{
+					RequestId:              456,
+					GetBlockHeadersRequest: tt.query,
+				})
+				expected := &BlockHeadersPacket{RequestId: 456, BlockHeadersRequest: headers}
+				if err := p2p.ExpectMsg(peer.app, BlockHeadersMsg, expected); err != nil {
+					t.Errorf("test %d by hash: headers mismatch: %v", i, err)
+				}
+			}
+		}
+	}
+}
+
+// Tests that block contents can be retrieved from a remote chain based on their hashes.
+func TestGetBlockBodies1(t *testing.T) { testGetBlockBodies(t, QRL1) }
+
+func testGetBlockBodies(t *testing.T, protocol uint) {
+	t.Parallel()
+
+	gen := func(n int, g *core.BlockGen) {
+		if n%2 == 0 {
+			w := &types.Withdrawal{
+				Address: common.Address{0xaa},
+				Amount:  42,
+			}
+			g.AddWithdrawal(w)
+		}
+	}
+
+	backend := newTestBackendWithGenerator(maxBodiesServe+15, gen)
+	defer backend.close()
+
+	peer, _ := newTestPeer("peer", protocol, backend)
+	defer peer.close()
+
+	// Create a batch of tests for various scenarios
+	limit := maxBodiesServe
+	tests := []struct {
+		random    int           // Number of blocks to fetch randomly from the chain
+		explicit  []common.Hash // Explicitly requested blocks
+		available []bool        // Availability of explicitly requested blocks
+		expected  int           // Total number of existing blocks to expect
+	}{
+		{1, nil, nil, 1},             // A single random block should be retrievable
+		{10, nil, nil, 10},           // Multiple random blocks should be retrievable
+		{limit, nil, nil, limit},     // The maximum possible blocks should be retrievable
+		{limit + 1, nil, nil, limit}, // No more than the possible block count should be returned
+		{0, []common.Hash{backend.chain.Genesis().Hash()}, []bool{true}, 1},      // The genesis block should be retrievable
+		{0, []common.Hash{backend.chain.CurrentBlock().Hash()}, []bool{true}, 1}, // The chains head block should be retrievable
+		{0, []common.Hash{{}}, []bool{false}, 0},                                 // A non existent block should not be returned
+
+		// Existing and non-existing blocks interleaved should not cause problems
+		{0, []common.Hash{
+			{},
+			backend.chain.GetBlockByNumber(1).Hash(),
+			{},
+			backend.chain.GetBlockByNumber(10).Hash(),
+			{},
+			backend.chain.GetBlockByNumber(100).Hash(),
+			{},
+		}, []bool{false, true, false, true, false, true, false}, 3},
+	}
+	// Run each of the tests and verify the results against the chain
+	for i, tt := range tests {
+		// Collect the hashes to request, and the response to expect
+		var (
+			hashes []common.Hash
+			bodies []*BlockBody
+			seen   = make(map[int64]bool)
+		)
+		for j := 0; j < tt.random; j++ {
+			for {
+				num := rand.Int63n(int64(backend.chain.CurrentBlock().Number.Uint64()))
+				if !seen[num] {
+					seen[num] = true
+
+					block := backend.chain.GetBlockByNumber(uint64(num))
+					hashes = append(hashes, block.Hash())
+					if len(bodies) < tt.expected {
+						bodies = append(bodies, &BlockBody{Transactions: block.Transactions(), Withdrawals: block.Withdrawals()})
+					}
+					break
+				}
+			}
+		}
+		for j, hash := range tt.explicit {
+			hashes = append(hashes, hash)
+			if tt.available[j] && len(bodies) < tt.expected {
+				block := backend.chain.GetBlockByHash(hash)
+				bodies = append(bodies, &BlockBody{Transactions: block.Transactions(), Withdrawals: block.Withdrawals()})
+			}
+		}
+
+		// Send the hash request and verify the response
+		p2p.Send(peer.app, GetBlockBodiesMsg, &GetBlockBodiesPacket{
+			RequestId:             123,
+			GetBlockBodiesRequest: hashes,
+		})
+		if err := p2p.ExpectMsg(peer.app, BlockBodiesMsg, &BlockBodiesPacket{
+			RequestId:           123,
+			BlockBodiesResponse: bodies,
+		}); err != nil {
+			t.Fatalf("test %d: bodies mismatch: %v", i, err)
+		}
+	}
+}
+
+// Tests that block bodies can be retrieved when blocks are at maximum size
+// (filled with transactions consuming the entire gas limit). This verifies
+// that the handler correctly respects softResponseLimit with large blocks.
+func TestGetBlockBodiesMaxBlockSize1(t *testing.T) {
+	testGetBlockBodiesMaxBlockSize(t, QRL1)
+}
+
+func newTestBackendMaxBlocks(blocks int, gen func(int, *core.BlockGen)) *testBackend {
+	var (
+		db                      = rawdb.NewMemoryDatabase()
+		config                  = params.MainnetChainConfig
+		engine consensus.Engine = beacon.NewFaker()
+	)
+	// Use a massive balance to sustain max-size blocks with rising EIP-1559 base fees.
+	balance := new(big.Int).Exp(big.NewInt(10), big.NewInt(76), nil)
+	gspec := &core.Genesis{
+		Config:   config,
+		GasLimit: params.MaxGasLimit,
+		Alloc:    core.GenesisAlloc{testAddr: {Balance: balance}},
+	}
+	chain, _ := core.NewBlockChain(db, nil, gspec, engine, vm.Config{}, nil)
+	_, bs, _ := core.GenerateChainWithGenesis(gspec, engine, blocks, gen)
+	if _, err := chain.InsertChain(bs); err != nil {
+		panic(err)
+	}
+	for _, block := range bs {
+		chain.TrieDB().Commit(block.Root(), false)
+	}
+	txconfig := legacypool.DefaultConfig
+	txconfig.Journal = ""
+	pool := legacypool.New(txconfig, chain)
+	txpool, _ := txpool.New(new(big.Int).SetUint64(txconfig.PriceLimit), chain, []txpool.SubPool{pool})
+	return &testBackend{db: db, chain: chain, txpool: txpool}
+}
+
+func testGetBlockBodiesMaxBlockSize(t *testing.T, protocol uint) {
+	t.Parallel()
+
+	signer := types.NewZondSigner(params.MainnetChainConfig.ChainID)
+	numBlocks := 5
+
+	// Generate blocks packed with transactions to simulate max block sizes.
+	// Each tx carries full ML-DSA-87 signature + public key (~7KB per tx).
+	// With MaxGasLimit (20M) and TxGas (21000), we get ~952 txs per block (~6.6 MB).
+	txsPerBlock := params.MaxGasLimit/params.TxGas - 1
+	var nonce uint64
+	gen := func(n int, g *core.BlockGen) {
+		to := common.Address{0x01}
+		baseFee := g.BaseFee()
+		gasFeeCap := new(big.Int).Mul(baseFee, big.NewInt(10))
+		for i := uint64(0); i < txsPerBlock; i++ {
+			tx := types.MustSignNewTx(testWallet, signer, &types.DynamicFeeTx{
+				ChainID:   params.MainnetChainConfig.ChainID,
+				Nonce:     nonce,
+				GasTipCap: big.NewInt(1),
+				GasFeeCap: gasFeeCap,
+				Gas:       params.TxGas,
+				To:        &to,
+				Value:     big.NewInt(1),
+			})
+			g.AddTx(tx)
+			nonce++
+		}
+	}
+
+	backend := newTestBackendMaxBlocks(numBlocks, gen)
+	defer backend.close()
+
+	peer, _ := newTestPeer("peer", protocol, backend)
+	defer peer.close()
+
+	// Collect all block hashes and expected bodies
+	var allHashes []common.Hash
+	var allBodies []*BlockBody
+	for i := uint64(1); i <= uint64(numBlocks); i++ {
+		block := backend.chain.GetBlockByNumber(i)
+		allHashes = append(allHashes, block.Hash())
+		allBodies = append(allBodies, &BlockBody{Transactions: block.Transactions(), Withdrawals: block.Withdrawals()})
+	}
+
+	// Log block sizes for visibility
+	for i, hash := range allHashes {
+		block := backend.chain.GetBlockByHash(hash)
+		t.Logf("Block %d: %d txs, body RLP size: %d bytes", i+1, len(block.Transactions()), len(backend.chain.GetBodyRLP(hash)))
+	}
+
+	// Test 1: Request a single max-size block
+	t.Run("single_max_block", func(t *testing.T) {
+		p2p.Send(peer.app, GetBlockBodiesMsg, &GetBlockBodiesPacket{
+			RequestId:             1,
+			GetBlockBodiesRequest: allHashes[:1],
+		})
+		if err := p2p.ExpectMsg(peer.app, BlockBodiesMsg, &BlockBodiesPacket{
+			RequestId:           1,
+			BlockBodiesResponse: allBodies[:1],
+		}); err != nil {
+			t.Fatalf("single block body mismatch: %v", err)
+		}
+	})
+
+	// Test 2: Request all max-size blocks — expect response truncated by softResponseLimit
+	t.Run("all_max_blocks", func(t *testing.T) {
+		p2p.Send(peer.app, GetBlockBodiesMsg, &GetBlockBodiesPacket{
+			RequestId:             2,
+			GetBlockBodiesRequest: allHashes,
+		})
+		// Read the response and verify we got at least 1 body but likely
+		// fewer than requested due to softResponseLimit
+		msg, err := peer.app.ReadMsg()
+		if err != nil {
+			t.Fatalf("failed to read response: %v", err)
+		}
+		defer msg.Discard()
+
+		if msg.Code != BlockBodiesMsg {
+			t.Fatalf("expected BlockBodiesMsg (%d), got %d", BlockBodiesMsg, msg.Code)
+		}
+
+		var resp BlockBodiesPacket
+		if err := msg.Decode(&resp); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+
+		if len(resp.BlockBodiesResponse) == 0 {
+			t.Fatal("expected at least one block body in response")
+		}
+		t.Logf("Requested %d max-size blocks, received %d bodies (softResponseLimit=%d)",
+			len(allHashes), len(resp.BlockBodiesResponse), softResponseLimit)
+	})
+}
+
+// Tests that requesting large blocks correctly limits the response.
+// With ~6.9 MB per block, the softResponseLimit (10 MB) should cap the
+// response to fewer bodies than requested.
+func TestGetBlockBodiesMaxServeMaxSize1(t *testing.T) {
+	testGetBlockBodiesMaxServeMaxSize(t, QRL1)
+}
+
+func testGetBlockBodiesMaxServeMaxSize(t *testing.T, protocol uint) {
+	t.Parallel()
+
+	signer := types.NewZondSigner(params.MainnetChainConfig.ChainID)
+	numBlocks := 5 // Only need a few max-size blocks to verify softResponseLimit caps the response
+
+	txsPerBlock := params.MaxGasLimit/params.TxGas - 1
+	var nonce uint64
+	gen := func(n int, g *core.BlockGen) {
+		to := common.Address{0x01}
+		baseFee := g.BaseFee()
+		gasFeeCap := new(big.Int).Mul(baseFee, big.NewInt(10))
+		for i := uint64(0); i < txsPerBlock; i++ {
+			tx := types.MustSignNewTx(testWallet, signer, &types.DynamicFeeTx{
+				ChainID:   params.MainnetChainConfig.ChainID,
+				Nonce:     nonce,
+				GasTipCap: big.NewInt(1),
+				GasFeeCap: gasFeeCap,
+				Gas:       params.TxGas,
+				To:        &to,
+				Value:     big.NewInt(1),
+			})
+			g.AddTx(tx)
+			nonce++
+		}
+	}
+
+	backend := newTestBackendMaxBlocks(numBlocks, gen)
+	defer backend.close()
+
+	peer, _ := newTestPeer("peer", protocol, backend)
+	defer peer.close()
+
+	// Collect all block hashes
+	var allHashes []common.Hash
+	for i := uint64(1); i <= uint64(numBlocks); i++ {
+		block := backend.chain.GetBlockByNumber(i)
+		allHashes = append(allHashes, block.Hash())
+	}
+
+	// Log first and last block sizes
+	first := backend.chain.GetBodyRLP(allHashes[0])
+	last := backend.chain.GetBodyRLP(allHashes[len(allHashes)-1])
+	t.Logf("Generated %d max-size blocks (first body: %d bytes, last body: %d bytes)",
+		numBlocks, len(first), len(last))
+
+	// Request all blocks at once
+	p2p.Send(peer.app, GetBlockBodiesMsg, &GetBlockBodiesPacket{
+		RequestId:             1,
+		GetBlockBodiesRequest: allHashes,
+	})
+
+	msg, err := peer.app.ReadMsg()
+	if err != nil {
+		t.Fatalf("failed to read response: %v", err)
+	}
+	defer msg.Discard()
+
+	if msg.Code != BlockBodiesMsg {
+		t.Fatalf("expected BlockBodiesMsg (%d), got %d", BlockBodiesMsg, msg.Code)
+	}
+
+	var resp BlockBodiesPacket
+	if err := msg.Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	received := len(resp.BlockBodiesResponse)
+	if received == 0 {
+		t.Fatal("expected at least one block body in response")
+	}
+	if received >= numBlocks {
+		t.Fatalf("expected fewer than %d bodies due to softResponseLimit, got %d", numBlocks, received)
+	}
+
+	// With ~6.9 MB blocks and 10 MB softResponseLimit, expect only 1-2 bodies
+	t.Logf("Requested %d max-size blocks, received %d bodies (softResponseLimit=%d)",
+		numBlocks, received, softResponseLimit)
+}
+
+// Tests that the transaction receipts can be retrieved based on hashes.
+func TestGetBlockReceipts1(t *testing.T) { testGetBlockReceipts(t, QRL1) }
+
+func testGetBlockReceipts(t *testing.T, protocol uint) {
+	t.Parallel()
+
+	// Define three accounts to simulate transactions with
+	acc1Wallet := testutil.LoadAccount(t, "bob").Wallet(t)
+	acc2Wallet := testutil.LoadAccount(t, "carol").Wallet(t)
+	acc1Addr := acc1Wallet.GetAddress()
+	acc2Addr := acc2Wallet.GetAddress()
+
+	signer := types.ZondSigner{ChainId: big.NewInt(1)}
+	// Create a chain generator with some simple transactions (blatantly stolen from @fjl/chain_markets_test)
+	generator := func(i int, block *core.BlockGen) {
+		to1 := common.Address(acc1Addr)
+		to2 := common.Address(acc2Addr)
+		switch i {
+		case 0:
+			// In block 1, the test bank sends account #1 some quanta.
+			tx := types.NewTx(&types.DynamicFeeTx{
+				Nonce:     block.TxNonce(testAddr),
+				To:        &to1,
+				Value:     big.NewInt(10_000_000_000_000_000),
+				Gas:       params.TxGas,
+				GasFeeCap: block.BaseFee(),
+				Data:      nil,
+			})
+			signedTx, _ := types.SignTx(tx, signer, testWallet)
+			block.AddTx(signedTx)
+		case 1:
+			// In block 2, the test bank sends some more quanta to account #1.
+			// acc1Addr passes it on to account #2.
+			tx1 := types.NewTx(&types.DynamicFeeTx{
+				Nonce:     block.TxNonce(testAddr),
+				To:        &to1,
+				Value:     big.NewInt(1_000_000_000_000_000),
+				Gas:       params.TxGas,
+				GasFeeCap: block.BaseFee(),
+				Data:      nil,
+			})
+			tx2 := types.NewTx(&types.DynamicFeeTx{
+				Nonce:     block.TxNonce(acc1Addr),
+				To:        &to2,
+				Value:     big.NewInt(1_000_000_000_000_000),
+				Gas:       params.TxGas,
+				GasFeeCap: block.BaseFee(),
+				Data:      nil,
+			})
+			signedTx1, _ := types.SignTx(tx1, signer, testWallet)
+			signedTx2, _ := types.SignTx(tx2, signer, acc1Wallet)
+			block.AddTx(signedTx1)
+			block.AddTx(signedTx2)
+		case 2:
+			// Block 3 is empty but was mined by account #2.
+			block.SetCoinbase(acc2Addr)
+			block.SetExtra([]byte("yeehaw"))
+		}
+	}
+	// Assemble the test environment
+	backend := newTestBackendWithGenerator(4, generator)
+	defer backend.close()
+
+	peer, _ := newTestPeer("peer", protocol, backend)
+	defer peer.close()
+
+	// Collect the hashes to request, and the response to expect
+	var (
+		hashes   []common.Hash
+		receipts [][]*types.Receipt
+	)
+	for i := uint64(0); i <= backend.chain.CurrentBlock().Number.Uint64(); i++ {
+		block := backend.chain.GetBlockByNumber(i)
+
+		hashes = append(hashes, block.Hash())
+		receipts = append(receipts, backend.chain.GetReceiptsByHash(block.Hash()))
+	}
+	// Send the hash request and verify the response
+	p2p.Send(peer.app, GetReceiptsMsg, &GetReceiptsPacket{
+		RequestId:          123,
+		GetReceiptsRequest: hashes,
+	})
+	if err := p2p.ExpectMsg(peer.app, ReceiptsMsg, &ReceiptsPacket{
+		RequestId:        123,
+		ReceiptsResponse: receipts,
+	}); err != nil {
+		t.Errorf("receipts mismatch: %v", err)
+	}
+}

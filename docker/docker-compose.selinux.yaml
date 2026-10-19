@@ -1,0 +1,50 @@
+# SELinux overlay: pins each popup-node service to the qrl_popup_t
+# domain declared in docker/selinux/qrl_popup.te.
+#
+# Stacks on top of docker-compose.yaml + docker-compose.hardened.yaml +
+# docker-compose.seccomp.yaml. Needs the policy module compiled and
+# loaded on the host, and the data dirs relabeled with
+# qrl_popup_data_t (see docker/selinux/README.md).
+#
+# Bring up:
+#   qrlenv run -- docker compose \
+#     -f docker/docker-compose.yaml \
+#     -f docker/docker-compose.hardened.yaml \
+#     -f docker/docker-compose.seccomp.yaml \
+#     -f docker/docker-compose.selinux.yaml \
+#     up -d
+
+services:
+  gqrl-node1:
+    security_opt:
+      - label=type:qrl_popup_t
+  gqrl-node2:
+    security_opt:
+      - label=type:qrl_popup_t
+  gqrl-node3:
+    security_opt:
+      - label=type:qrl_popup_t
+  gqrl-node4:
+    security_opt:
+      - label=type:qrl_popup_t
+
+  beacon-node1:
+    security_opt:
+      - label=type:qrl_popup_t
+  beacon-node2:
+    security_opt:
+      - label=type:qrl_popup_t
+  beacon-node3:
+    security_opt:
+      - label=type:qrl_popup_t
+  beacon-node4:
+    security_opt:
+      - label=type:qrl_popup_t
+
+  validator:
+    security_opt:
+      - label=type:qrl_popup_t
+
+  dashboard:
+    security_opt:
+      - label=type:qrl_popup_t

@@ -1,0 +1,81 @@
+# docker.sock overlay — gives the dashboard read access to the host
+# docker daemon so /api/compose/status can render the running compose
+# stack in the UI (task #99).
+#
+# SECURITY: mounting docker.sock into a container is effectively root
+# on the host — the mounted process can `docker run --privileged`,
+# read all other containers, etc. Only enable this on development
+# machines where you personally operate the dashboard. Never enable
+# on a shared or production host.
+#
+# The dashboard talks to the daemon via docker's native HTTP-over-Unix
+# API (no docker CLI needed inside the container — Node's http.request
+# with socketPath). So the ONLY mount required is the socket itself.
+#
+# On Linux the socket is /var/run/docker.sock (owner typically root:docker).
+# On macOS Docker Desktop, the socket is at $HOME/.docker/run/docker.sock
+# and is proxied to /var/run/docker.sock inside containers automatically.
+# For Podman, override QRL_DOCKER_SOCK to /run/user/$UID/podman/podman.sock.
+#
+# Use:
+#   qrlenv run -- docker compose \
+#       -f docker-compose.yaml \
+#       -f docker-compose.docker-sock.yaml \
+#       up
+
+services:
+
+  dashboard:
+    volumes:
+      - "${QRL_DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock:ro"
+      # Task #100 C2/C4: expose the host's docker/ dir read-only so the
+      # dashboard can (a) parse docker/.env for qrlenv panel counts,
+      # (b) enumerate docker/out/ release artifacts. Mounted at the
+      # same path the container-side code expects (/opt/qrl/app/docker/).
+      - ".:/opt/qrl/app/docker:ro"
+      # C4 also needs to build+sign, which shells to bash scripts that
+      # cd into the repo root (to build mldsa87keygen, invoke docker
+      # buildx with `context: ..`, etc). Mount the whole repo at a
+      # SEPARATE path so it doesn't shadow the dashboard image's code.
+      # Backend uses process.env.QRL_REPO_ROOT to override __dirname.
+      - "..:/opt/qrl/repo:ro"
+      # Release scripts write into docker/out/ (signed manifest,
+      # bundled tarballs) and docker/tls/ (gen-tls-cert output).
+      # Same read-only repo mount above shadows those subpaths; overlay
+      # RW mounts on top so writes land back on the host. host dirs
+      # are created lazily by the scripts.
+      - "./out:/opt/qrl/repo/docker/out:rw"
+      - "./tls:/opt/qrl/repo/docker/tls:rw"
+      # mldsa87keygen builder needs a writable Go module cache. tmpfs
+      # keeps it inside the container (doesn't pollute host $HOME).
+    tmpfs:
+      - /tmp:size=128m,mode=1777,noexec,nosuid,nodev
+      - /home/node/go:size=256m,mode=1777,noexec,nosuid,nodev
+      # docker CLI writes to $DOCKER_CONFIG/config.json + buildx state.
+      # Root FS is read_only:true (phase-2 hardening) so give docker its
+      # own tmpfs. 32MB is plenty for CLI config + buildx metadata.
+      - /home/node/.docker:size=32m,mode=0700,uid=1000,gid=1000,noexec,nosuid,nodev
+      # buildx caches under $HOME/.cache/docker; separate small tmpfs
+      # so a build doesn't fill the .docker mount.
+      - /home/node/.cache:size=256m,mode=0755,uid=1000,gid=1000,noexec,nosuid,nodev
+    environment:
+      QRL_REPO_ROOT: /opt/qrl/repo
+      # Point release scripts at the container-native mldsa87keygen
+      # (Dockerfile.status-server builds it in a Go builder stage).
+      # Without this the scripts probe qrl-2.0/tools/mldsa87keygen/mldsa87keygen
+      # under the read-only repo mount — which is the operator's darwin
+      # binary on macOS hosts and can't execute in the Linux container.
+      QRL_MLDSA_BIN: /opt/qrl/bin/mldsa87keygen
+      # Point docker CLI + buildx at the writable tmpfs dirs above.
+      # Belt-and-suspenders: DOCKER_CONFIG chooses the config path;
+      # HOME makes any tool that infers from $HOME/.docker land there
+      # too (some buildx plugins do this).
+      DOCKER_CONFIG: /home/node/.docker
+      BUILDX_CONFIG: /home/node/.docker/buildx
+      HOME: /home/node
+    # If the host socket is group-owned (Linux, typically root:docker),
+    # override QRL_DOCKER_GID to the docker group's gid so UID 1000 can
+    # read the socket without joining the group directly. On macOS
+    # Docker Desktop leave empty (socket is 0666-permissive by default).
+    group_add:
+      - "${QRL_DOCKER_GID:-0}"

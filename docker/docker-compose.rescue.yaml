@@ -1,0 +1,119 @@
+# Rescue-edition overlay — swaps every gqrl service to build/run the
+# rescue-edition variant (qrl-2.0/variants/rescue-edition, zRonin
+# precompiles at 0x20/0x21/0x22 on top of moscow-chill's 0x03/0x06).
+#
+# Use for an isolated compose project (typically `l2-rescue`) running
+# alongside the standard qrl-popup stack, so an L2 dev loop doesn't
+# have to disturb the standard testbed.
+#
+# Bring up (all required env vars are in this file's canonical form —
+# the shell doesn't need to set QRL_DATA_DIR; you can if you want a
+# different host location):
+#
+#   qrlenv run -- docker compose \
+#       -p l2-rescue \
+#       --env-file docker/.env \
+#       -f docker/docker-compose.yaml \
+#       -f docker/docker-compose.docker-sock.yaml \
+#       -f docker/docker-compose.rescue.yaml \
+#       up -d
+#
+# With QRL_DATA_DIR override to isolate volumes from qrl-popup:
+#   QRL_DATA_DIR=./data-l2-rescue \
+#     qrlenv run -- docker compose -p l2-rescue \
+#       -f docker/docker-compose.yaml \
+#       -f docker/docker-compose.docker-sock.yaml \
+#       -f docker/docker-compose.rescue.yaml \
+#       up -d
+#
+# Every service overrides:
+#   - container_name (l2-rescue- prefix so the two projects don't collide)
+#   - published host ports:
+#       gqrl-node[1-4] HTTP RPC   9545-9548  →  9745-9748
+#       gqrl-node[1-4] WS         9645-9648  →  9845-9848
+#       beacon-node1  REST/gRPC   3600/4100  →  3700/4200
+#       dashboard     HTTP        8080       →  8180
+#
+# gqrl services also swap image tag + build variant path. Beacon /
+# validator run stock (rescue-edition only extends the execution layer).
+
+# Reference an existing qrl-gqrl:rescue-edition image (produced by
+# docker/build-images.sh or the RELEASE tab's BUILD button). We do NOT
+# declare `build:` here on purpose — 4 gqrl services trying to build
+# the same tag in parallel race and 3 of them fail with `image already
+# exists` from the exporter. If the image is missing, run:
+#
+#   docker/build-images.sh rescue-edition        # (host bare-metal)
+# or POST /api/release/build {"filter":"rescue-edition"} against the
+# qrl-popup dashboard, which will produce docker/out/qrl-gqrl-rescue-edition.oci.tar
+# AND load qrl-gqrl:rescue-edition into the local daemon.
+x-gqrl-rescue: &gqrl-rescue
+  image: qrl-gqrl:rescue-edition
+  pull_policy: never
+
+services:
+
+  # Compose merges `ports` lists across files by default, which would
+  # end up asking for both the qrl-popup ports (9545…8080) AND the
+  # rescue overrides. `!override` (Compose 2.24+) forces replacement so
+  # the rescue stack binds *only* the shifted ports and never fights
+  # qrl-popup for its bindings.
+
+  # ── Execution layer (rescue-edition variant) ──────────────────────────
+  gqrl-node1:
+    <<: *gqrl-rescue
+    container_name: l2-rescue-gqrl-node1
+    ports: !override
+      - "127.0.0.1:9745:9545"
+      - "127.0.0.1:9845:9645"
+  gqrl-node2:
+    <<: *gqrl-rescue
+    container_name: l2-rescue-gqrl-node2
+    ports: !override
+      - "127.0.0.1:9746:9545"
+      - "127.0.0.1:9846:9645"
+  gqrl-node3:
+    <<: *gqrl-rescue
+    container_name: l2-rescue-gqrl-node3
+    ports: !override
+      - "127.0.0.1:9747:9545"
+      - "127.0.0.1:9847:9645"
+  gqrl-node4:
+    <<: *gqrl-rescue
+    container_name: l2-rescue-gqrl-node4
+    ports: !override
+      - "127.0.0.1:9748:9545"
+      - "127.0.0.1:9848:9645"
+
+  # ── Consensus layer (unchanged binary, isolated names/ports) ─────────
+  beacon-node1:
+    container_name: l2-rescue-beacon-node1
+    ports: !override
+      - "127.0.0.1:4200:4100"
+      - "127.0.0.1:3700:3600"
+  beacon-node2:
+    container_name: l2-rescue-beacon-node2
+  beacon-node3:
+    container_name: l2-rescue-beacon-node3
+  beacon-node4:
+    container_name: l2-rescue-beacon-node4
+  bootstrap-fetcher:
+    container_name: l2-rescue-bootstrap-fetcher
+  validator:
+    container_name: l2-rescue-validator
+
+  # ── Dashboard on port 8180 (qrl-popup owns 8080) ─────────────────────
+  # COMPOSE_PROJECT_NAME plumbed into the container so the dashboard's
+  # /api/dashboard/identity + all label-filtered docker queries scope
+  # to this stack, not qrl-popup.
+  dashboard:
+    container_name: l2-rescue-dashboard
+    ports: !override
+      - "127.0.0.1:8180:8080"
+    environment:
+      COMPOSE_PROJECT_NAME: l2-rescue
+      # Rank label shown in the header chip. LEAD is the default for the
+      # canonical stack (qrl-popup); this stack is a sibling running the
+      # rescue-edition variant, so it identifies as L2 instead. Operator
+      # can pick any short label — see handleDashboardIdentity.
+      QRL_STACK_RANK: L2

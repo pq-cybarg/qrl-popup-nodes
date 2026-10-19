@@ -1,0 +1,69 @@
+# Rootless-safe validator image for popup nodes.
+#
+# Same hardening rules as Dockerfile.gqrl. See docs/POPUP-NODES-ROOTLESS.md.
+# Note that the qrysm builder covers both beacon-chain and validator; if
+# you're going to use both, you can save build time by using
+# --target=runtime with a shared builder tag. See docker-compose.yaml.
+
+# Base images pinned by digest — refresh via docker/refresh-base-digests.sh.
+# See docker/BASE-IMAGE-DIGESTS.md for the "why" (supply-chain).
+ARG BUILDER_IMAGE=golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59
+ARG RUNTIME_IMAGE=alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+
+# --- builder stage ------------------------------------------------------------
+
+FROM ${BUILDER_IMAGE} AS builder
+
+RUN apk add --no-cache gcc musl-dev linux-headers git
+
+ARG QRYSM_PATH=qrl-2.0/upstream/qrysm
+ARG GOQRL_PATH=qrl-2.0/upstream/go-qrl
+
+# qrysm's go.mod has `replace github.com/theQRL/go-qrl => ../go-qrl` —
+# lay both trees out as siblings, matching the on-disk repo.
+WORKDIR /src
+COPY ${GOQRL_PATH}/ /src/go-qrl/
+COPY ${QRYSM_PATH}/ /src/qrysm/
+
+WORKDIR /src/qrysm
+RUN if [ -f go.mod ]; then go mod download; fi
+
+RUN go build -buildvcs=false -trimpath -ldflags="-s -w" -o /out/validator ./cmd/validator \
+    && ls -la /out/validator
+
+# --- runtime stage ------------------------------------------------------------
+
+FROM ${RUNTIME_IMAGE} AS runtime
+
+RUN apk add --no-cache ca-certificates tini openssl
+
+RUN addgroup -g 1000 qrl \
+    && adduser -D -H -u 1000 -G qrl -s /sbin/nologin qrl
+
+RUN mkdir -p /opt/qrl/bin /opt/qrl/data /opt/qrl/config \
+    && chown -R 1000:1000 /opt/qrl
+
+COPY --from=builder --chown=1000:1000 /out/validator /opt/qrl/bin/validator
+
+RUN find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -exec chmod a-s {} + 2>/dev/null || true
+
+USER 1000:1000
+WORKDIR /opt/qrl
+
+# Validator has no P2P — talks only to its paired beacon-chain via gRPC.
+# One exposed port for optional metrics.
+EXPOSE 8081
+
+ENTRYPOINT ["/sbin/tini", "-g", "--", "/opt/qrl/bin/validator"]
+
+# Interop-mode defaults. The 4-validator interop set is deterministic and
+# matches the `--num-validators=4` genesis qrysmctl generates. Non-interop
+# runs need to mount a real key manifest.
+CMD ["--datadir=/opt/qrl/data", \
+     "--chain-config-file=/opt/qrl/config/config.yml", \
+     "--interop-num-validators=4", \
+     "--interop-start-index=0", \
+     "--beacon-rpc-provider=beacon-node1:4100", \
+     "--suggested-fee-recipient=Q00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001", \
+     "--accept-terms-of-use", \
+     "--verbosity=info", "--log-format=text"]
