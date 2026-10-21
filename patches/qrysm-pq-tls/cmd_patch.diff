@@ -1,0 +1,112 @@
+From: pq-cybarg <resistant@tuta.com>
+Subject: [PATCH] beacon-chain: add --pq-tls-* flags for native PQ-TLS
+
+Adds native post-quantum TLS termination to the beacon-chain gRPC
+gateway, closing the one-hop plaintext gap between the dashboard
+sidecar (nginx + openssl-oqs-provider) and the gateway handler.
+
+Signed-off-by: pq-cybarg <resistant@tuta.com>
+---
+ cmd/beacon-chain/flags/base.go |  32 ++++++++++++++
+ beacon-chain/gateway/gateway.go |  18 ++++++++
+ 2 files changed, 50 insertions(+)
+
+diff --git a/cmd/beacon-chain/flags/base.go b/cmd/beacon-chain/flags/base.go
+index abcdef1..1234567 100644
+--- a/cmd/beacon-chain/flags/base.go
++++ b/cmd/beacon-chain/flags/base.go
+@@ -XX,YY +XX,YY @@ var (
+ 		Name:  "tls-key",
+ 		Usage: "Path to a TLS key file to serve the gRPC gateway over.",
+ 	}
++	// --- PQ-TLS flags (task #94) -----------------------------------
++	// Enable native post-quantum TLS termination. Default off; when
++	// cert+key are set the gateway handshake offers X25519MLKEM768
++	// (or ML-KEM-768 if --pq-tls-kem overrides). Composes with #93:
++	// if the pinned ML-DSA-87 pubkey + detached signature are passed,
++	// the beacon REFUSES TO START on hybrid signature mismatch.
++	PQTLSCert = &cli.StringFlag{
++		Name:  "pq-tls-cert",
++		Usage: "Path to the TLS cert for native PQ-TLS on the gRPC gateway.",
++	}
++	PQTLSKey = &cli.StringFlag{
++		Name:  "pq-tls-key",
++		Usage: "Path to the TLS key for native PQ-TLS on the gRPC gateway.",
++	}
++	PQTLSKem = &cli.StringFlag{
++		Name:  "pq-tls-kem",
++		Usage: "KEM to offer: 'x25519mlkem768' (default) or 'mlkem768'.",
++		Value: "x25519mlkem768",
++	}
++	PQTLSMLDSASig = &cli.StringFlag{
++		Name:  "pq-tls-mldsa-sig",
++		Usage: "Path to the ML-DSA-87 detached signature over the cert DER (hybrid mode).",
++	}
++	PQTLSMLDSAPub = &cli.StringFlag{
++		Name:  "pq-tls-mldsa-pub",
++		Usage: "Path to the pinned ML-DSA-87 public key for the hybrid signature.",
++	}
+ )
+
+ // All returns a list of all flags.
+@@ -XX,YY +XX,YY @@ func All() []cli.Flag {
+ 	return []cli.Flag{
+ 		TLSCert,
+ 		TLSKey,
++		PQTLSCert,
++		PQTLSKey,
++		PQTLSKem,
++		PQTLSMLDSASig,
++		PQTLSMLDSAPub,
+ 		GRPCMaxMsgSizeFlag,
+ 		// ... rest unchanged
+ 	}
+ }
+
+diff --git a/beacon-chain/gateway/gateway.go b/beacon-chain/gateway/gateway.go
+index 1234567..abcdef1 100644
+--- a/beacon-chain/gateway/gateway.go
++++ b/beacon-chain/gateway/gateway.go
+@@ -XX,YY +XX,YY @@ import (
+ 	"github.com/theQRL/qrysm/cmd/beacon-chain/flags"
++	// pq_tls.go lives in this package
+ )
+
+@@ -XX,YY +XX,YY @@ func (g *Gateway) Start() {
+-	if g.cfg.certFile != "" {
+-		if err := g.server.ListenAndServeTLS(g.cfg.certFile, g.cfg.keyFile); err != nil {
+-			log.WithError(err).Fatal("gateway TLS listen failed")
+-		}
+-	} else {
+-		if err := g.server.ListenAndServe(); err != nil {
+-			log.WithError(err).Fatal("gateway listen failed")
+-		}
+-	}
++	pq := PQTLSConfig{
++		CertPath:    g.cfg.pqCertFile,
++		KeyPath:     g.cfg.pqKeyFile,
++		KEM:         g.cfg.pqKEM,
++		MLDSASig:    g.cfg.pqMLDSASig,
++		MLDSAPub:    g.cfg.pqMLDSAPub,
++	}
++	if pq.Enabled() {
++		tlsCfg, err := pq.Build()
++		if err != nil {
++			log.WithError(err).Fatal("PQ-TLS config invalid — refusing to start")
++		}
++		g.server.TLSConfig = tlsCfg
++		if err := g.server.ListenAndServeTLS("", ""); err != nil {
++			log.WithError(err).Fatal("gateway PQ-TLS listen failed")
++		}
++	} else if g.cfg.certFile != "" {
++		if err := g.server.ListenAndServeTLS(g.cfg.certFile, g.cfg.keyFile); err != nil {
++			log.WithError(err).Fatal("gateway classical-TLS listen failed")
++		}
++	} else {
++		if err := g.server.ListenAndServe(); err != nil {
++			log.WithError(err).Fatal("gateway listen failed")
++		}
++	}
+ }
+--
+2.43.0

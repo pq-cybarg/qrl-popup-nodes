@@ -5,6 +5,15 @@ beacon + validator — as **rootless, hardened Docker/Podman
 containers** with a batteries-included operator dashboard. Three
 variants (standard, rescue-edition, moscow-chill) run side-by-side.
 
+> **Third-party build.** This repo is maintained at
+> [pq-cybarg/qrl-popup-nodes](https://github.com/pq-cybarg/qrl-popup-nodes)
+> and is **not affiliated with or endorsed by The QRL Foundation**.
+> It vendors public artefacts from [theQRL](https://github.com/theQRL)
+> (go-qrl, qrysm, go-qrllib) at pinned commits for a local-only
+> popup-node packaging. The precompile spec it targets is
+> [QIP #46](https://github.com/theQRL/qips/pull/46) (draft; see
+> [variants](docs/variants.md) for the source-code drift note).
+
 [![PQ-safe](https://img.shields.io/badge/crypto-PQ_safe-3fcf3f)](docs/security.md)
 [![rootless](https://img.shields.io/badge/runtime-rootless-3fcf3f)](docs/security.md#defense-in-depth)
 [![read--only](https://img.shields.io/badge/rootfs-read_only-3fcf3f)](docs/security.md#defense-in-depth)
@@ -18,20 +27,15 @@ variants (standard, rescue-edition, moscow-chill) run side-by-side.
 ## 60-second bringup
 
 ```bash
-git clone https://github.com/pq-cybarg/qrl-popup-nodes.git
+git clone https://github.com/theQRL/qrl-popup-nodes.git
 cd qrl-popup-nodes
-./scripts/bootstrap.sh                  # fetches theQRL upstream deps
-./docker/configure.sh                   # scaffolds .env + builds images + inits chaindata
+./docker/configure.sh
 qrlenv run -- docker compose \
     -f docker/docker-compose.yaml \
     -f docker/docker-compose.docker-sock.yaml \
     up -d
 open http://127.0.0.1:8080/
 ```
-
-`scripts/bootstrap.sh` clones the three theQRL upstream repos
-(`go-qrl`, `qrysm`, `go-qrllib`) at the pinned commits under
-`qrl-2.0/upstream/`. Re-run any time you want to re-pin.
 
 Within ~90 seconds the chain is producing blocks and the dashboard is
 live. See [docs/getting-started](docs/getting-started.md) for three

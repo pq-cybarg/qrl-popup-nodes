@@ -15,6 +15,14 @@ permalink: /
     batteries-included operator dashboard. Three variants (standard,
     rescue-edition, moscow-chill) run side-by-side on one host.
   </p>
+  <p style="font-size: 0.85rem; opacity: 0.75; max-width: 44rem; margin: -0.5rem 0 1rem 0;">
+    <strong>Third-party build.</strong> Maintained at
+    <a href="https://github.com/pq-cybarg/qrl-popup-nodes">pq-cybarg/qrl-popup-nodes</a>;
+    <strong>not affiliated with or endorsed by The QRL Foundation</strong>. Vendors public
+    artefacts from <a href="https://github.com/theQRL">theQRL</a> (go-qrl, qrysm,
+    go-qrllib) at pinned commits. Precompile spec target:
+    <a href="https://github.com/theQRL/qips/pull/46">QIP #46 (draft)</a>.
+  </p>
   <div class="badges">
     <img alt="PQ-safe" src="https://img.shields.io/badge/crypto-PQ_safe-3fcf3f">
     <img alt="rootless" src="https://img.shields.io/badge/runtime-rootless-3fcf3f">
@@ -69,7 +77,7 @@ at once, signed releases, and hardening overlays.
   <div class="stack-card mc">
     <span class="rank-chip">MC</span>
     <h3>l2-moscow</h3>
-    <p>Moscow-chill variant — DigitalGuards QIP spec: SHAKE256 at 0x03, ML-DSA-87 detached verify at 0x06. Canonical QRL 2.0 target.</p>
+    <p>Moscow-chill variant — <a href="https://github.com/theQRL/qips/pull/46">QIP #46</a>: ML-DSA-87 verify at 0x03 (64-byte frame), SHAKE256(x, 64) at 0x06. Canonical QRL 2.0 PQ precompiles.</p>
     <div class="port-row">gqrl :9945 · beacon :4000 · dashboard :8280</div>
   </div>
 </div>

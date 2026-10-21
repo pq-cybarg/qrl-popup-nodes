@@ -231,7 +231,7 @@ Update the genesis address in QuarkNet's funding script:
 
 ```bash
 # Edit fund-accounts.js
-cd ./l2/quark/predicates/drand/quarknet-kyber/deploy
+cd ./Desktop/projects/blockchain/qrl/l2/quark/predicates/drand/quarknet-kyber/deploy
 
 # Update GENESIS_ACCOUNT with new address from GENESIS_ACCOUNT_INFO.md
 ```
@@ -243,7 +243,7 @@ cd .
 ./go-zond/build/bin/gzond attach zond-private/node1/gzond.ipc
 
 # In console
-> loadScript("./l2/quark/predicates/drand/quarknet-kyber/deploy/fund-accounts.js")
+> loadScript("./Desktop/projects/blockchain/qrl/l2/quark/predicates/drand/quarknet-kyber/deploy/fund-accounts.js")
 ```
 
 This will distribute funds to the 5 QuarkNet deployment accounts.
@@ -406,7 +406,7 @@ cd .
 > loadScript(".../ fund-accounts.js")
 
 # 3. Deploy QuarkNet
-cd ./l2/quark/predicates/drand/quarknet-kyber/deploy
+cd ./Desktop/projects/blockchain/qrl/l2/quark/predicates/drand/quarknet-kyber/deploy
 ./zond-deploy.sh
 ```
 
@@ -517,7 +517,7 @@ Before using on production/mainnet:
 - **stop-nodes.sh** - Stop all nodes
 
 ### QuarkNet Integration
-- **./l2/quark/predicates/drand/quarknet-kyber/deploy/**
+- **./Desktop/projects/blockchain/qrl/l2/quark/predicates/drand/quarknet-kyber/deploy/**
   - FUNDING_INSTRUCTIONS.md
   - QUARKNET_ACCOUNTS.md
   - fund-accounts.js

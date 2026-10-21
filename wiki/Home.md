@@ -2,8 +2,14 @@
 
 Welcome. This wiki is the operator-facing documentation set for the
 QRL popup-node stack. The GitHub Pages site at
-<https://theqrl.github.io/qrl-popup-nodes/> is the public-facing
+<https://pq-cybarg.github.io/qrl-popup-nodes/> is the public-facing
 version; this wiki is the shorter, link-forward handbook.
+
+> **Third-party build.** Maintained at
+> [pq-cybarg/qrl-popup-nodes](https://github.com/pq-cybarg/qrl-popup-nodes);
+> **not affiliated with or endorsed by The QRL Foundation**. Vendors
+> public theQRL artefacts (go-qrl, qrysm, go-qrllib) at pinned
+> commits. Target precompile spec: [QIP #46](https://github.com/theQRL/qips/pull/46) (draft).
 
 ## What is a popup node?
 

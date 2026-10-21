@@ -7,7 +7,7 @@ Short version:
 | Image tag                  | Shipped overlay                     | Delta vs standard  |
 |----------------------------|-------------------------------------|--------------------|
 | `qrl-gqrl:standard`        | (base `docker-compose.yaml`)        | — baseline         |
-| `qrl-gqrl:moscow-chill`    | `docker-compose.moscow-chill.yaml`  | +SHAKE256 at 0x03, +ML-DSA-87 detached verify at 0x06 |
+| `qrl-gqrl:moscow-chill`    | `docker-compose.moscow-chill.yaml`  | [QIP #46](https://github.com/theQRL/qips/pull/46): ML-DSA-87 verify at 0x03 (64-byte frame), SHAKE256(x, 64) at 0x06 |
 | `qrl-gqrl:rescue-edition`  | `docker-compose.rescue.yaml`        | moscow-chill plus Rescue-Prime at 0x20, STARK verify at 0x21, ML-DSA-87 verify-with-addr at 0x22 |
 
 ## Which to pick
@@ -24,14 +24,23 @@ Short version:
 |------|-------------------------|--------------------------|--------------------------|
 | 0x01 | `depositroot`           | same                     | same                     |
 | 0x02 | `sha256hash`            | same                     | same                     |
-| 0x03 | `ripemd160hash`         | **`shake256(input, 64)`**| **`shake256(input, 64)`**|
-| 0x06 | `bn256AddGasEIP2565`    | **`mchillMLDSA87Verify`**| **`mchillMLDSA87Verify`**|
+| 0x03 | `ripemd160hash`         | **`mldsa87Verify`** (64-byte frame) | **`mldsa87Verify`** (64-byte frame) |
+| 0x06 | `bn256AddGasEIP2565`    | **`shake256(input, 64)`**| **`shake256(input, 64)`**|
 | 0x20 | —                       | —                        | **`rescuePrime`**        |
 | 0x21 | —                       | —                        | **`starkVerifier`**      |
 | 0x22 | —                       | —                        | **`mldsa87Verify`-with-addr** |
 
-RIPEMD-160 at 0x03 is replaced by SHAKE-256 in both PQ variants —
-intentional, documented spec divergence.
+RIPEMD-160 at 0x03 is replaced by ML-DSA-87 verify (64-byte frame)
+in both PQ variants per QIP #46. 0x06 is reassigned from
+bn256AddGasEIP2565 to SHAKE256(x, 64).
+
+> **Source-code drift note.** The variants vendored at this repo's
+> pinned `qrl-2.0/upstream/go-qrl` commit predate
+> [go-qrl PR #244](https://github.com/cyyber/go-qrl/pull/244) which
+> swapped the slots to the QIP #46 layout above. Operators building
+> for the live QRL 2.0 chain MUST re-pin `scripts/bootstrap.sh` to a
+> go-qrl commit at or after PR #244 so on-chain precompile addresses
+> match what the chain accepts.
 
 ## Building
 

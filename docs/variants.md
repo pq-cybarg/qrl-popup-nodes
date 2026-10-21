@@ -19,33 +19,49 @@ range respond to a `CALL`.
 |-----------------------------|--------------------------------------|--------------------------------------|
 | `qrl-gqrl:standard`         | (none — the base `docker-compose.yaml` ships standard) | QRL 2.0 baseline  |
 | `qrl-gqrl:rescue-edition`   | `docker/docker-compose.rescue.yaml`  | moscow-chill plus `0x20` Rescue-Prime, `0x21` STARK verify, `0x22` ML-DSA-87 verify-with-addr |
-| `qrl-gqrl:moscow-chill`     | `docker/docker-compose.moscow-chill.yaml` | DigitalGuards QIP spec: `0x03` SHAKE256(x,64), `0x06` ML-DSA-87 detached verify |
+| `qrl-gqrl:moscow-chill`     | `docker/docker-compose.moscow-chill.yaml` | [QIP #46](https://github.com/theQRL/qips/pull/46): `0x03` ML-DSA-87 verify (64-byte frame), `0x06` SHAKE256(input, 64) |
 
 ## Precompile table — side by side
 
-Both variants retain the standard first precompile slots:
+The QIP #46 slot assignments (per [go-qrl PR #244](https://github.com/cyyber/go-qrl/pull/244)):
 
-| Addr | Standard               | moscow-chill            | rescue-edition          |
-|------|------------------------|-------------------------|-------------------------|
-| 0x01 | `depositroot`          | same                    | same                    |
-| 0x02 | `sha256hash`           | same                    | same                    |
-| 0x03 | `ripemd160hash`        | **`shake256(input, 64)`** | **`shake256(input, 64)`** |
-| 0x04 | `dataCopy`             | same                    | same                    |
-| 0x05 | `bigModExp`            | same                    | same                    |
-| 0x06 | `bn256AddGasEIP2565`   | **`mchillMLDSA87Verify`** detached | **`mchillMLDSA87Verify`** detached |
-| 0x07 | `bn256ScalarMulGasEIP2565` | same                | same                    |
-| 0x08 | `bn256PairingGasEIP2565`   | same                | same                    |
-| 0x09 | `blake2F`              | same                    | same                    |
-| 0x20 | —                      | —                       | **`rescuePrime`** Rp64_256/512 |
-| 0x21 | —                      | —                       | **`starkVerifier`** |
-| 0x22 | —                      | —                       | **`mldsa87Verify`** with-addr |
+| Addr | Standard               | moscow-chill             | rescue-edition           |
+|------|------------------------|--------------------------|--------------------------|
+| 0x01 | `depositroot`          | same                     | same                     |
+| 0x02 | `sha256hash`           | same                     | same                     |
+| 0x03 | `ripemd160hash`        | **`mldsa87Verify`** (64-byte frame) | **`mldsa87Verify`** (64-byte frame) |
+| 0x04 | `dataCopy`             | same                     | same                     |
+| 0x05 | `bigModExp`            | same                     | same                     |
+| 0x06 | `bn256AddGasEIP2565`   | **`shake256(input, 64)`**| **`shake256(input, 64)`**|
+| 0x07 | `bn256ScalarMulGasEIP2565` | same                 | same                     |
+| 0x08 | `bn256PairingGasEIP2565`   | same                 | same                     |
+| 0x09 | `blake2F`              | same                     | same                     |
+| 0x20 | —                      | —                        | **`rescuePrime`** Rp64_256/512 |
+| 0x21 | —                      | —                        | **`starkVerifier`**      |
+| 0x22 | —                      | —                        | **`mldsa87Verify`** verify-with-addr |
 
-The `shake256` precompile at `0x03` **replaces** `ripemd160` in both
-moscow-chill and rescue-edition. Contracts calling `0x03` for RIPEMD-160
-on those variants will get a SHAKE256(input, 64) response instead —
-this is an intentional, documented spec divergence (RIPEMD-160 is a
-2003 primitive with no quantum relevance and reclaiming the slot for
-SHAKE-256 keeps the precompile table tight).
+The `mldsa87Verify` precompile at `0x03` **replaces** `ripemd160` in both
+moscow-chill and rescue-edition. Contracts calling `0x03` on either
+variant get an ML-DSA-87 verification against a 64-byte frame instead —
+an intentional, QIP #46-defined spec divergence. RIPEMD-160 is a 2003
+primitive with no quantum relevance; the slot is reclaimed for the
+PQ-signature verifier so wallets and the connect SDK can verify the
+exact 64-byte SHAKE-256 digest they signed over.
+
+The `shake256` precompile at `0x06` replaces `bn256AddGasEIP2565`.
+Gas cost is `240 + 48 × ceil(len / 64)` with overflow-safe accounting;
+return width is fixed at 64 bytes.
+
+> **Source-code drift note.** The variants vendored at this repo's
+> pinned `qrl-2.0/upstream/go-qrl` commit (`b92884a3`) predate
+> go-qrl PR #244, which swapped the slots to the QIP #46 layout
+> above. Variant trees shipped in this repo may still show the old
+> `0x03=shake256 / 0x06=mldsa87Verify` wiring in `core/vm/contracts.go`
+> comments. Operators building for the live QRL 2.0 chain MUST re-pin
+> `scripts/bootstrap.sh` to a go-qrl commit at or after PR #244 so
+> the on-chain precompile addresses match what the chain accepts. The
+> ports / tests / dashboards here are address-agnostic — the only
+> file that pins the mapping is the variant's `contracts.go`.
 
 ## When to pick which
 
