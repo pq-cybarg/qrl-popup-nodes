@@ -24,7 +24,7 @@ contributor who wants to drive one or both patches home.
 | Layer                | Current primitive              | Target        | Blocker                        |
 |----------------------|--------------------------------|---------------|--------------------------------|
 | TLS handshake (KEM)  | X25519 + ML-KEM-768 hybrid     | same          | — (already in place)           |
-| TLS handshake (sig)  | ECDSA P-256 cert               | **ML-DSA-87** | #93 (no `crypto/x509` support) |
+| TLS handshake (sig)  | ECDSA P-256 cert               | **ML-DSA-87 via MTC** | #93 — Chrome's chosen path is MTC, not direct ML-DSA X.509 |
 | TLS record (cipher)  | AES-256-GCM / ChaCha20-Poly1305 | same          | — (symmetric, PQ-safe)         |
 | qrysm gRPC gateway   | plain TCP (dashboard sidecar wraps) | ML-KEM/ML-DSA | #94 (needs patch to qrysm)  |
 
@@ -32,6 +32,104 @@ The dashboard already terminates PQ-TLS correctly — a reverse proxy
 sidecar (nginx with the openssl-oqs-provider) handles the hybrid KEM
 and serves an ECDSA cert underneath. The cert signature is the one
 classical primitive left in the hot path.
+
+## Why not just put ML-DSA in X.509 certs
+
+Short version: **Google's Chrome team explicitly chose not to.**
+Benjamin et al. observed that an ML-DSA-87 signature is ~4.5 KB vs
+~64 bytes for ECDSA P-256. A typical TLS 1.3 handshake sees two or
+three cert signatures (leaf + intermediates + CT SCTs). Direct ML-DSA
+X.509 pushes handshake size from ~2 KB today to ~15–50 KB —
+enough to blow QUIC's initial window and double TLS RTT. Chrome's
+answer is **Merkle Tree Certificates (MTC)**.
+
+## Merkle Tree Certificates (MTC)
+
+MTC changes **how certs are delivered**, not what signs them:
+
+- A CA batches many certs (billions per day) into a Merkle tree.
+- The CA publishes **one PQ-signed tree head** per batch — the only
+  ML-DSA signature anyone transmits.
+- A server sends the leaf cert + a **short inclusion proof** — ~736
+  bytes to prove membership in a 4.4 million-cert tree ([Encryption
+  Consulting analysis][ec]). No per-cert ML-DSA signature on the wire.
+- The client has already synced recent tree heads out-of-band (like
+  CRL/CT today) and verifies the inclusion proof against a trusted
+  head.
+
+Net effect: handshake size stays Ethernet-frame-sized while **every
+signature in the chain is post-quantum**.
+
+### Who's shipping
+
+- **IETF**: `draft-ietf-plants-merkle-tree-certs-07` (PLANTS working
+  group, last updated 2026-10-07). Still evolving — not yet an RFC.
+- **Google / Chrome**: ran a live Chrome Beta experiment Aug 2026
+  (half of Beta users got MTC-signed test cert chains, billions of
+  handshakes). Chrome has publicly declared MTC the preferred path
+  for PQ on the public web.
+- **Cloudflare**: announced a public CA on 2026-09-29 — applying to
+  Chrome / Apple / Microsoft / Mozilla root programs, acquiring a
+  GlobalSign root. **Production MTC issuance targeted Q1 2027.**
+- **Let's Encrypt**: announced MTC support on 2026-06-03 — staging
+  environment late 2026, production during 2027.
+
+### Impact on this stack
+
+For the **popup-node use case** (localhost dev, no public CA
+dependency, no WAN latency to worry about), MTC is unnecessary. The
+hybrid detached-signature mode already shipped in
+[`docker/gen-tls-cert.sh --mldsa`](https://github.com/pq-cybarg/qrl-popup-nodes/blob/main/docker/gen-tls-cert.sh)
+closes the one classical primitive in the handshake without any
+delivery-mechanism cleverness.
+
+For a **public-facing dashboard** (operator exposing their node to
+the LAN, publishing a QNS record over PQ-TLS, etc.), two paths now
+exist:
+
+1. **Self-hosted MTC CA (shipped — see [MTC CA](mtc-ca.html)).** The
+   repo includes [`qrl-2.0/tools/qrl-mtc-ca/`](https://github.com/pq-cybarg/qrl-popup-nodes/tree/main/qrl-2.0/tools/qrl-mtc-ca)
+   — a minimum-viable MTC CA that batches certs, signs tree heads
+   with ML-DSA-87, and emits per-leaf inclusion proofs. Trust model
+   is pin-by-pubkey (SSH `known_hosts`-style), which is the right
+   fit for operator-to-operator and consortium deployments. **No
+   waiting.**
+2. **Wait for Cloudflare / Let's Encrypt in Q1 2027** if you need a
+   browser-root-trusted CA. Then plug an MTC-aware ACME client into
+   the dashboard's cert-gen hook. The dashboard's existing `/api/tls/gen-cert` endpoint (and the
+`openssl-oqs-provider` sidecar) will plug into an MTC CA's ACME
+flow unchanged — the server-side TLS stack just carries whatever
+the CA signed into.
+
+### Composition with #93
+
+MTC and the "ML-DSA-87 X.509 signature algorithm" story (#93 as
+originally scoped) are **not alternatives — they compose**:
+
+- The MTC CA still uses ML-DSA-87 to sign the tree head.
+- The leaf certs delivered via MTC can still carry an ML-DSA-87
+  subject public key (just not an ML-DSA signature inside the leaf,
+  since the Merkle inclusion proof is what authenticates the leaf).
+- The Go `crypto/x509` upstream patch (#93) is still useful for
+  parsing MTC-delivered leafs that happen to have ML-DSA subject
+  public key info.
+
+### Operator checklist for Q1 2027
+
+When Cloudflare / Let's Encrypt open production MTC issuance:
+
+1. Rebuild the dashboard image against an MTC-aware TLS stack —
+   `openssl-oqs-provider` with the MTC verifier added, or a Go stack
+   with the `draft-ietf-plants` tree-head verifier.
+2. Point `/api/tls/gen-cert` at an MTC-aware ACME client (Caddy,
+   lego, or whichever ships support first).
+3. Pre-cache tree heads via the CA's monitor endpoint (CRL-equivalent)
+   on startup so a cold start doesn't block on a WAN fetch.
+4. Operators behind air-gaps keep using
+   `docker/gen-tls-cert.sh --mldsa` — the self-signed hybrid is the
+   right answer where no WebPKI dependency exists.
+
+[ec]: https://www.encryptionconsulting.com/about-merkle-tree-certificates/
 
 ## Task #93 — ML-DSA-87 X.509 certs
 
