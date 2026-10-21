@@ -27,7 +27,7 @@ deploy to mainnet" checklist.
 
 - [Running locally](Running-Locally.html) — bringup in 60s + three
   stacks at once.
-- [Architecture](Architecture.html) — the four-container-per-tier
+- [Architecture](Architecture.html) — single-operator chain
   topology, Engine API, go-qrl unification.
 - [Variants](Variants.html) — standard vs rescue-edition vs
   moscow-chill, precompile tables.

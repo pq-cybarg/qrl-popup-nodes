@@ -247,7 +247,7 @@ extension falling back to ECDSA.
 
 ## Tracking
 
-- #93 — [theQRL/qrysm#...](link TBD) + Go proposal.
+- #93 — [MTC](mtc-ca.html) is the Chrome-chosen successor to direct ML-DSA-in-X.509; the shipped `qrl-2.0/tools/qrl-mtc-ca/` is the self-hosted CA.
 - #94 — [theQRL/qrysm#78](https://github.com/theQRL/qrysm/issues/78).
 - Hybrid-cert sidecar — shipped (see
   `docker/popup-node/nginx-beacon-pqtls.conf`).

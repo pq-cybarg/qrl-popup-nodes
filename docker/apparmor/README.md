@@ -93,3 +93,35 @@ Each profile denies, in enforce mode:
 
 Everything not listed in the `allow` section is denied by default
 (`flags=(enforce)`).
+
+## ⚠️ qrl-dashboard carries a privilege cliff
+
+Unlike the other three profiles, `qrl-dashboard.aa` allows read-write
+access to `/var/run/docker.sock`:
+
+```
+/var/run/docker.sock rw,
+```
+
+This is required for the dashboard's `/api/compose/{status,reset,
+projects,container/*}` and `/api/release/*` endpoints — they speak
+HTTP to the docker daemon over that socket.
+
+**docker.sock access is equivalent to root on the host.** A compromise
+of the dashboard process (via a 0-day in Node.js, in status-server.js
+itself, or in a dependency) lets the attacker `docker exec` into any
+other container on the host (gqrl / beacon / validator) as uid 0 and
+escape containers entirely.
+
+Mitigations if the dashboard's trust bar is too high for your
+deployment:
+
+1. Mount the socket **read-only** by changing `rw` → `r` here. You
+   lose `/api/compose/reset`, `/api/compose/container/*`, and the
+   release pipeline — but the dashboard still works as a status
+   surface.
+2. Run the dashboard in a separate compose project with its own
+   bridge, so a compromise can't reach the other services via docker
+   DNS even with socket access.
+3. Front the dashboard with an auth proxy (basic auth over
+   `docker-compose.tls.yaml`) so remote reach is gated.

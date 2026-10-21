@@ -1,22 +1,23 @@
 # Architecture
 
 Full write-up at
-[docs/architecture](https://theqrl.github.io/qrl-popup-nodes/architecture.html).
+[docs/architecture](https://pq-cybarg.github.io/qrl-popup-nodes/architecture.html).
 Three key points:
 
-## 1. Two-layer consensus split
+## 1. Single-operator chain
 
-Like Ethereum post-merge: **consensus layer** (`qrysm` beacon,
-proof-of-stake, finality, fork choice) + **execution layer**
-(`gqrl`, state, mempool, QRVM). Engine API on port 9551
-(authrpc, JWT-authenticated) is the only interface between them.
+A QRL popup stack is a **single-operator chain** — one trust root,
+one host, one validator process holding all four validator keystores
+wrapped by `qrlenv` (Argon2id → AES-256-GCM). Used for sovereign
+operators (treasury / QRC-20 dev / QNS / consortium coordination)
+and for staging environments ahead of public-chain deployment.
 
-## 2. 1:1 node pairing
+## 2. Two-layer consensus split
 
-Each gqrl-node[1-4] pairs with beacon-node[1-4] by shared
-`jwtsecret-nodeN`. All four nodes peer on an isolated bridge.
-One validator holds all four validator keystores — interop-style
-single-tenant chain. SLOTS_PER_EPOCH=128, SECONDS_PER_SLOT=60.
+**Consensus layer** (`qrysm` beacon, proof-of-stake, finality,
+fork choice) + **execution layer** (`gqrl`, state, mempool, QRVM).
+Engine API on port 9551 (authrpc, JWT-authenticated) is the only
+interface between them. SLOTS_PER_EPOCH=128, SECONDS_PER_SLOT=60.
 
 ## 3. Variants only differ in `core/vm/contracts.go`
 

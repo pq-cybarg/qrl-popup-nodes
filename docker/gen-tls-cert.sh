@@ -122,9 +122,12 @@ if [[ "${WITH_MLDSA}" -eq 1 ]]; then
     mldsa_seed=$(python3 -c "import json,sys; print(json.loads(sys.stdin.read())['seed'])" <<< "$kg_out")
     mldsa_pub=$(python3 -c "import json,sys; print(json.loads(sys.stdin.read())['publicKey'])" <<< "$kg_out")
 
-    # Store seed (chmod 600) and pubkey
+    # Store seed. Create the file with 0600 BEFORE writing so no
+    # window exists where umask-default perms expose it to another
+    # process scanning OUT_DIR. (Reviewer flag: TOCTOU window
+    # between printf and chmod 600 — closed by install first.)
+    install -m 0600 /dev/null "$OUT_DIR/mldsa.seed"
     printf '%s\n' "$mldsa_seed" > "$OUT_DIR/mldsa.seed"
-    chmod 600 "$OUT_DIR/mldsa.seed"
     printf '%s\n' "$mldsa_pub" > "$OUT_DIR/mldsa.pub"
     chmod 644 "$OUT_DIR/mldsa.pub"
 
