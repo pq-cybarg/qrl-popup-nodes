@@ -82,6 +82,8 @@ for entry in "${IMAGES[@]}"; do
 
     if [ -n "$FILTER" ]; then
         match=0
+        # Unquoted $FILTER word-splits on IFS and glob-expands against
+        # CWD; dashboard-side validation keeps the value regex-safe.
         for f in $FILTER; do
             case "$tag" in
                 *"$f"*|"$f"*) match=1; break;;

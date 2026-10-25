@@ -510,12 +510,41 @@ function parseBody(req) {
     });
 }
 
+// Loopback-only origins. The dashboard is a LOCAL operator surface —
+// never meant for public exposure. CORS now echoes only the exact
+// request origin IF it's a loopback address; a cross-origin request
+// from any public site gets a bare response with no CORS allowance,
+// which the browser then refuses to let JS read (and preflight gates
+// stop state-changing requests entirely).
+//
+// Was `Access-Control-Allow-Origin: *` which let any site drive
+// /api/release/*, /api/compose/*, /api/wallet/*, etc. via the
+// operator's own browser. Reviewer-flagged as critical.
+const LOOPBACK_ORIGIN_RE = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/;
+function allowedOrigin(req) {
+    const o = req.headers.origin;
+    return o && LOOPBACK_ORIGIN_RE.test(o) ? o : null;
+}
+function securityHeaders(req) {
+    const allow = allowedOrigin(req);
+    const h = {
+        'X-Frame-Options': 'DENY',                 // no clickjacking via iframe
+        'X-Content-Type-Options': 'nosniff',       // no MIME sniffing attacks
+        'Referrer-Policy': 'no-referrer',
+        'Cache-Control': 'no-store',
+    };
+    if (allow) {
+        h['Access-Control-Allow-Origin'] = allow;
+        h['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS';
+        h['Access-Control-Allow-Headers'] = 'Content-Type';
+        h['Vary'] = 'Origin';
+    }
+    return h;
+}
 function jsonResponse(res, data, status = 200) {
     res.writeHead(status, {
         'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type'
+        ...securityHeaders(res.req || { headers: {} }),
     });
     res.end(JSON.stringify(data));
 }
@@ -4525,12 +4554,32 @@ async function handleReleaseBuild(req, res) {
 async function handleReleaseSign(req, res) {
     const body = await parseBody(req);
     const env = {};
-    if (body.walletId) env.QRL_WALLET_ID = body.walletId;
-    if (body.seedHex)  env.SEED_HEX = body.seedHex;
+    // Strict input validation — reviewer flagged: raw body.seedHex and
+    // body.walletId were previously stuffed into process env without
+    // any format check. Enforce the exact shapes so an attacker-
+    // controlled POST (cross-origin or otherwise) can't smuggle a
+    // 10MB string or embedded newlines into bash's environment.
+    if (body.walletId !== undefined) {
+        if (typeof body.walletId !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(body.walletId)) {
+            return jsonResponse(res, { success: false, error: 'walletId must be 1-64 chars of [a-zA-Z0-9_-]' });
+        }
+        env.QRL_WALLET_ID = body.walletId;
+    }
+    if (body.seedHex !== undefined) {
+        if (typeof body.seedHex !== 'string' || !/^[0-9a-fA-F]{96}$/.test(body.seedHex)) {
+            return jsonResponse(res, { success: false, error: 'seedHex must be exactly 96 hex chars' });
+        }
+        env.SEED_HEX = body.seedHex;
+    }
     if (!env.QRL_WALLET_ID && !env.SEED_HEX) {
         return jsonResponse(res, { success: false, error: 'Provide walletId or seedHex.' });
     }
     runReleaseScript('sign-images.sh', [], env, 120000, (err, out) => {
+        // Scrub the seed from this process's environment copy — the
+        // child has exited; we don't want the string sitting in Node's
+        // GC heap or /proc/<pid>/environ longer than necessary.
+        env.SEED_HEX = '0'.repeat(96);
+        delete env.SEED_HEX;
         jsonResponse(res, {
             success: !err,
             error: err ? errDetail(err) : null,
@@ -4596,7 +4645,16 @@ async function handleReleaseLoad(req, res) {
         return jsonResponse(res, { success: false, error: 'File not found or not a .tar.', resolved });
     }
     const env = {};
-    if (body.pinnedPubkey) env.PINNED_PUBKEY = body.pinnedPubkey;
+    // Strict pinnedPubkey format — must be hex of a sensible length.
+    // ML-DSA-87 pubkey is 2592 bytes = 5184 hex chars; allow a reasonable
+    // range (1024-8192) to tolerate hybrid or variant pubkey shapes
+    // without opening the field to arbitrary smuggling.
+    if (body.pinnedPubkey !== undefined) {
+        if (typeof body.pinnedPubkey !== 'string' || !/^[0-9a-fA-F]{1024,8192}$/.test(body.pinnedPubkey)) {
+            return jsonResponse(res, { success: false, error: 'pinnedPubkey must be 1024-8192 hex chars' });
+        }
+        env.PINNED_PUBKEY = body.pinnedPubkey;
+    }
     runReleaseScript('load-release.sh', [resolved], env, 300000, (err, out) => {
         jsonResponse(res, {
             success: !err,
@@ -6654,19 +6712,72 @@ async function handleNFTCollection(req, res) {
 
 // ========== SERVER ==========
 
+// Per-IP token bucket for /api/*. Prevents a page the operator
+// visits from flooding Argon2id / docker-buildx / compose-reset
+// endpoints with free requests. Loopback-only tool, so the budget
+// can be modest; override via QRL_API_RATE_* env vars if an
+// honest workload trips the limit.
+const RATE_BURST = parseInt(process.env.QRL_API_RATE_BURST || '60', 10);
+const RATE_REFILL_PER_SEC = parseInt(process.env.QRL_API_RATE_REFILL || '10', 10);
+const _buckets = new Map(); // ip → { tokens, lastRefill }
+function rateLimitAllow(ip) {
+    const now = Date.now();
+    let b = _buckets.get(ip);
+    if (!b) { b = { tokens: RATE_BURST, lastRefill: now }; _buckets.set(ip, b); }
+    const elapsedSec = (now - b.lastRefill) / 1000;
+    b.tokens = Math.min(RATE_BURST, b.tokens + elapsedSec * RATE_REFILL_PER_SEC);
+    b.lastRefill = now;
+    if (b.tokens < 1) return false;
+    b.tokens -= 1;
+    return true;
+}
+// Prune stale buckets every 5 min to bound memory.
+setInterval(() => {
+    const cutoff = Date.now() - 10 * 60 * 1000;
+    for (const [ip, b] of _buckets) {
+        if (b.lastRefill < cutoff) _buckets.delete(ip);
+    }
+}, 5 * 60 * 1000).unref();
+
 const server = http.createServer(async (req, res) => {
-    // Handle CORS preflight
+    // Bind req to res so jsonResponse can read req.headers.origin.
+    res.req = req;
+
+    // Loopback-only CORS preflight. See securityHeaders().
     if (req.method === 'OPTIONS') {
-        res.writeHead(204, {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type'
-        });
+        res.writeHead(204, securityHeaders(req));
         res.end();
         return;
     }
 
     const url = req.url.split('?')[0];
+
+    // Rate-limit /api/* per client IP.
+    if (url.startsWith('/api/')) {
+        const ip = req.socket.remoteAddress || 'unknown';
+        if (!rateLimitAllow(ip)) {
+            res.writeHead(429, {
+                'Content-Type': 'application/json',
+                'Retry-After': '1',
+                ...securityHeaders(req),
+            });
+            res.end(JSON.stringify({ success: false, error: 'rate limited — slow down' }));
+            return;
+        }
+    }
+
+    // Origin check: any state-changing request from a non-loopback
+    // origin is refused. Browsers can still make the request, but the
+    // dashboard refuses to act on it. (GETs are read-only metadata,
+    // allowed from any origin to simplify dashboard tabbing.)
+    if (req.method === 'POST' && url.startsWith('/api/')) {
+        const o = req.headers.origin;
+        if (o && !LOOPBACK_ORIGIN_RE.test(o)) {
+            res.writeHead(403, { 'Content-Type': 'application/json', ...securityHeaders(req) });
+            res.end(JSON.stringify({ success: false, error: 'cross-origin requests from non-loopback origins are refused on state-changing endpoints' }));
+            return;
+        }
+    }
 
     // API routes
     if (url === '/api/status') {
@@ -6847,21 +6958,41 @@ const server = http.createServer(async (req, res) => {
     else if (url === '/' || url === '/index.html') {
         // Serve new dashboard by default
         const htmlPath = path.join(__dirname, 'dashboard-v2.html');
-        if (fs.existsSync(htmlPath)) {
-            const html = fs.readFileSync(htmlPath, 'utf8');
-            res.writeHead(200, { 'Content-Type': 'text/html' });
-            res.end(html);
-        } else {
-            // Fallback to old dashboard
-            const fallbackPath = path.join(__dirname, 'dashboard.html');
-            const html = fs.readFileSync(fallbackPath, 'utf8');
-            res.writeHead(200, { 'Content-Type': 'text/html' });
-            res.end(html);
-        }
+        const servePath = fs.existsSync(htmlPath) ? htmlPath : path.join(__dirname, 'dashboard.html');
+        const html = fs.readFileSync(servePath, 'utf8');
+        res.writeHead(200, {
+            'Content-Type': 'text/html',
+            // CSP is permissive on inline because the dashboard uses
+            // inline event handlers + inline script tags — reflow would
+            // mean rewriting ~10k lines of HTML. We lock down the big
+            // escape routes (frame-src, object-src, base-uri) and keep
+            // network reach loopback-only.
+            'Content-Security-Policy': [
+                "default-src 'self' 'unsafe-inline' data: blob:",
+                "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:",
+                "connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* https://127.0.0.1:* http://localhost:* ws://localhost:*",
+                "img-src 'self' data: https://img.shields.io",
+                "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+                "font-src 'self' data: https://fonts.gstatic.com",
+                "frame-src 'none'",
+                "object-src 'none'",
+                "base-uri 'self'",
+                "form-action 'self'",
+            ].join('; '),
+            'X-Frame-Options': 'DENY',
+            'X-Content-Type-Options': 'nosniff',
+            'Referrer-Policy': 'no-referrer',
+        });
+        res.end(html);
     } else if (url === '/old' || url === '/v1') {
         const htmlPath = path.join(__dirname, 'dashboard.html');
         const html = fs.readFileSync(htmlPath, 'utf8');
-        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.writeHead(200, {
+            'Content-Type': 'text/html',
+            'X-Frame-Options': 'DENY',
+            'X-Content-Type-Options': 'nosniff',
+            'Referrer-Policy': 'no-referrer',
+        });
         res.end(html);
     } else if (url === '/vendor/hash-wasm/argon2.umd.min.js' && req.method === 'GET') {
         // Vendored Argon2id (hash-wasm 4.11.0 UMD). Integrity-checked on
