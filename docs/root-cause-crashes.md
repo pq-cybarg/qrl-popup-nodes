@@ -67,15 +67,26 @@ mmap completes.
 
 ### Mitigations
 
-1. **Vacuum the DB offline** before restart. See
-   `docker/vacuum-beacon-db.sh`. Reduces 1.8 GB back to the live-state
-   footprint (~300 MB). First-boot mmap drops to a few seconds.
-2. **Move node1's chaindata to a Docker volume** instead of a
-   bind-mount. VirtioFS adds 10-30% I/O overhead; a named volume lives
-   inside the Linux VM and mmap stays fast. See
-   `docker/docker-compose.beacon-volume.yaml`.
-3. **Bump beacon-node1's healthcheck `start_period` to 600s** so the
-   mmap has time to complete. See the compose overlay.
+1. **Move node1's chaindata to a named Docker volume** instead of a
+   bind-mount. VirtioFS adds 10-30% I/O overhead; a named volume
+   lives inside the Linux VM and mmap stays fast regardless of DB
+   size. See `docker/docker-compose.beacon-volume.yaml`. **This is
+   the only mitigation that fully resolves Finding 1** for the
+   interop-executiondata-votes workload; the other two are
+   workarounds.
+2. **Bump beacon-node1's healthcheck `start_period` to 600s** so the
+   mmap has time to complete before compose declares the container
+   unhealthy. Shipped in the beacon-volume overlay.
+3. ~~**Vacuum the DB offline** via `docker/vacuum-beacon-db.sh`.~~
+   **Empirically ineffective for this workload** — a 2026-11-09
+   vacuum of the live 1.8 GB beacon-node1 DB reclaimed 0% (bbolt
+   compact reported `1763127296 -> 1763127296 bytes (gain=1.00x)`).
+   The DB is not fragmented; it is genuinely 1.8 GB of live state.
+   The script is still shipped and still useful for chains whose
+   BoltDB fragments over time (common in long-running eth2 clients),
+   but **cannot help the interop-executiondata-votes profile this
+   repo uses** because every slot's state transition is persisted
+   and never pruned (see Finding 3).
 
 ## Finding 2 — "Computer crashed" is OS-level swap thrash, not kernel panic
 
@@ -146,17 +157,114 @@ Specifically:
    is a daily driver. VirtioFS is specifically a macOS/Windows
    pain-point; native Docker on Linux has none of this overhead.
 
+## Finding 3 — unbounded cache growth on the lead proposer
+
+### Evidence
+
+`docker stats` snapshot taken 2026-11-09 across all three stacks:
+
+| container                 | uptime  | RSS       |
+|---------------------------|---------|-----------|
+| qrl-beacon-node1          | 1 min   | 79 MB *(just restarted)* |
+| l2-rescue-beacon-node1    | 3 days  | **799 MB** |
+| l2-moscow-beacon-node1    | 3 days  | **907 MB** |
+| qrl-beacon-node[2-4]      | 8 days  | 51-60 MB  |
+| l2-rescue-beacon-node[2-4]| 8 days  | 48-53 MB  |
+| l2-moscow-beacon-node[2-4]| 8 days  | 50-52 MB  |
+| all gqrl-nodeN            | 8 days  | 15-33 MB  |
+| all validators            | mins    | 22-48 MB  |
+| all dashboards            | 8 days  | 28-31 MB  |
+
+Only the **lead proposer** on each stack grows. Followers stay flat.
+Growth rate: ~12 MB/hour (900 MB / 72 hours).
+
+### Root cause
+
+In qrysm's `--interop-executiondata-votes` mode with a **single
+validator**, there is no 2/3 quorum for finalization. State transitions
+are persisted to BoltDB every slot (bloating the on-disk DB linearly,
+see Finding 1), AND the in-memory `forkchoice` store, attestation pool,
+and state cache keep every state the chain has ever seen because the
+finalization-triggered prune never fires.
+
+This is a design-level unbounded-growth, not a classical memory leak
+in the C/malloc sense — the Go runtime is correctly tracking every
+allocation, it's just that nothing is marking them collectible.
+
+### Mitigations
+
+1. **Periodic restart** of the lead proposer (nightly cron, or
+   `docker restart qrl-beacon-node1` whenever RSS > 500 MB). The
+   state rehydrates from BoltDB; RSS resets to ~80 MB.
+2. **Resource-limits overlay already caps RSS** at 800 MB for
+   beacon-node1 and 400 MB for followers (`docker-compose.resource-limits.yaml`).
+   Under the cap the OOM-killer will restart the container
+   automatically — degenerate but bounded.
+3. **Structural fix (future)**: qrysm patch to allow
+   checkpoint-forced pruning without finalization, or run with
+   ≥4 validators distributed across nodes so finalization engages.
+
+## Finding 4 — non-popup containers dwarf the popup stacks
+
+### Evidence
+
+Same `docker stats` snapshot:
+
+| container       | RSS       | % of VM |
+|-----------------|-----------|---------|
+| quark-valence   | **3.4 GB** | **44%** |
+| quark-strong    | 149 MB    | 2%      |
+| quark           | 10 MB     | 0.1%    |
+| kurtosis-*      | ~50 MB    | 0.7%    |
+| **all 3 QRL stacks combined** | **~2.6 GB** | **34%** |
+
+On this host, non-popup Docker containers use **more memory than
+all three QRL stacks combined**, and `quark-valence` alone is the
+single biggest allocator in the VM.
+
+### Root cause
+
+Operator convenience: separate project (`quarknet`, a Valence-L3
+dev environment) was left running in the same Docker VM as the
+popup stacks. Neither project is aware of the other's memory
+budget; both grow until the VM compressor pegs.
+
+### Mitigation
+
+Operational: **stop non-popup containers before bringing up all
+three QRL stacks**, or move either workload to a separate Docker
+context. Not a code change.
+
+```bash
+docker stop quark-valence quark-strong quark
+# -or-
+docker context create popup --docker host=unix:///var/run/docker-popup.sock
+```
+
 ## Compound effect (the real bug)
 
-The two findings feed each other:
+Four findings feed each other:
 
-1. Host swap thrash makes the maintainer reboot.
-2. Reboot leaves BoltDB in a state that mmap-stalls.
-3. Beacon-node1 fails to come healthy → `depends_on` chain breaks →
-   nothing on the stack is reachable → maintainer thinks the chain
-   is broken → more frantic intervention → more memory pressure →
-   Goto 1.
+1. Finding 4 shrinks headroom (3.4 GB budget quietly claimed by
+   quark-valence).
+2. Finding 3 grows the lead proposers (~12 MB/hour × 3 stacks).
+3. Finding 2 kicks in once combined demand exceeds the 7.65 GB VM:
+   swap thrash, host unresponsive.
+4. The maintainer hard-reboots.
+5. Finding 1 kicks in on reboot: 1.8 GB BoltDB mmap stalls for
+   minutes → beacon-node1 fails healthcheck → depends_on chain
+   breaks → maintainer thinks the chain is broken → more frantic
+   intervention → more memory pressure → Goto 1.
 
-Breaking either link ends the cycle. The structural fix is **move
-chaindata off VirtioFS** (Finding 1 fix 2) + **cap per-service memory**
-(Finding 2 fix 3), both shipped in this commit.
+Breaking any link ends the cycle. The structural fixes shipped in
+this repo are:
+
+- Finding 1 (BoltDB mmap stall): `docker-compose.beacon-volume.yaml`
+  (named volume bypasses VirtioFS).
+- Finding 2 (swap thrash): `docker-compose.resource-limits.yaml`
+  (per-service memory caps).
+- Finding 3 (unbounded cache growth): resource-limits cap turns
+  the leak into a bounded restart cycle; periodic manual restart
+  for a smooth path.
+- Finding 4 (external RAM consumers): operational — stop unrelated
+  containers or move them to another Docker context.

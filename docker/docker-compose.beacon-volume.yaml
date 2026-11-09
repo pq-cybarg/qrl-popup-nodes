@@ -1,0 +1,84 @@
+# Beacon-chaindata on a named Docker volume instead of a VirtioFS
+# bind-mount.
+#
+# Context: on Docker Desktop (macOS/Windows), the default compose
+# config bind-mounts docker/data/beacon-nodeN into the beacon
+# container. BoltDB opens its chaindata with syscall.Mmap of the
+# full file. Over VirtioFS, a 1.8 GB mmap stalls the process for
+# minutes on cold-start — the container itself hits RSS=1.8 GB
+# (empirically measured) while the process is blocked in Mmap.
+# The healthcheck times out, compose marks it Unhealthy, the
+# depends_on chain collapses.
+#
+# Named Docker volumes live INSIDE the Linux VM — no VirtioFS hop.
+# mmap over ext4-on-VM is fast regardless of DB size.
+#
+# Trade-offs:
+#   * The chaindata is no longer accessible from the host
+#     filesystem directly. Use `docker run --rm -v
+#     qrl-popup_beacon-node1-chaindata:/d busybox ls -la /d/beaconchaindata`
+#     to inspect.
+#   * Snapshotting moves from `tar -czf` on docker/data/ to
+#     `docker run --rm -v <vol>:/src ... tar` — chain-snapshot.sh
+#     already supports both paths; see its --volumes flag.
+#
+# Also raises beacon-node1's healthcheck start_period from 120s
+# (default) to 600s to accommodate any legitimate slow-start on
+# large-state chains even post-volume-migration.
+#
+# Bring up (fresh genesis path — this overlay does NOT migrate
+# existing bind-mount chaindata):
+#
+#   qrlenv run -- docker compose \
+#       -f docker/docker-compose.yaml \
+#       -f docker/docker-compose.docker-sock.yaml \
+#       -f docker/docker-compose.resource-limits.yaml \
+#       -f docker/docker-compose.beacon-volume.yaml \
+#       up -d
+#
+# To migrate an existing chain, copy into the volume once before
+# bringing up with this overlay:
+#
+#   docker run --rm \
+#     -v $(pwd)/docker/data/beacon-node1:/src \
+#     -v qrl-popup_beacon-node1-chaindata:/dst \
+#     busybox sh -c 'cp -r /src/. /dst/ && chown -R 1000:1000 /dst'
+
+services:
+  beacon-node1:
+    volumes: !override
+      - beacon-node1-chaindata:/opt/qrl/data
+      - ${QRL_DATA_DIR:-./data}/config:/opt/qrl/config:ro
+    healthcheck:
+      # Longer start_period for any residual cold-start cost on
+      # multi-GB DBs. Named volume makes the fast path fast; this
+      # just keeps compose from killing us if the DB is huge.
+      test: ["CMD-SHELL", "curl -sf http://localhost:3600/qrl/v1/node/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 600s
+
+  beacon-node2:
+    volumes: !override
+      - beacon-node2-chaindata:/opt/qrl/data
+      - ${QRL_DATA_DIR:-./data}/config:/opt/qrl/config:ro
+      - qrl-bootstrap:/opt/qrl/bootstrap
+
+  beacon-node3:
+    volumes: !override
+      - beacon-node3-chaindata:/opt/qrl/data
+      - ${QRL_DATA_DIR:-./data}/config:/opt/qrl/config:ro
+      - qrl-bootstrap:/opt/qrl/bootstrap
+
+  beacon-node4:
+    volumes: !override
+      - beacon-node4-chaindata:/opt/qrl/data
+      - ${QRL_DATA_DIR:-./data}/config:/opt/qrl/config:ro
+      - qrl-bootstrap:/opt/qrl/bootstrap
+
+volumes:
+  beacon-node1-chaindata:
+  beacon-node2-chaindata:
+  beacon-node3-chaindata:
+  beacon-node4-chaindata:
