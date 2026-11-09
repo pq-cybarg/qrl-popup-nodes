@@ -1,0 +1,69 @@
+# Resource-limits overlay: caps per-service memory + CPU so three
+# stacks running concurrently can't exhaust the Docker Desktop VM
+# and trigger host-wide swap thrash.
+#
+# See docs/root-cause-crashes.md for the full analysis. Short
+# version:
+#   - Peak uncapped memory: ~5 GB/stack × 3 stacks = 15 GB
+#   - Default Docker Desktop VM: 8 GB
+#   - Delta eats host swap → macOS VM compressor pegs → system
+#     unresponsive → user force-reboots → BoltDBs left in state
+#     that mmap-stalls on next cold start.
+#
+# These caps are tuned for a 16 GB Mac running Docker Desktop with a
+# 12 GB VM allocation. Operators on larger hosts can delete the
+# `limits:` blocks; operators on smaller hosts should run one stack
+# at a time instead.
+#
+# Bring up:
+#   qrlenv run -- docker compose \
+#       -f docker/docker-compose.yaml \
+#       -f docker/docker-compose.docker-sock.yaml \
+#       -f docker/docker-compose.resource-limits.yaml \
+#       up -d
+
+services:
+  # Execution layer: mempool + state + QRVM. Of the three container
+  # classes gqrl's memory grows fastest — bump `limits.memory` if
+  # you intend to replay a long chain history on this node.
+  gqrl-node1: &gqrl-limits
+    deploy:
+      resources:
+        limits:   { memory: 600m, cpus: '1.0' }
+        reservations: { memory: 300m }
+  gqrl-node2: *gqrl-limits
+  gqrl-node3: *gqrl-limits
+  gqrl-node4: *gqrl-limits
+
+  # Consensus layer: SSZ state + fork choice. node1 (lead proposer)
+  # gets twice the budget because its DB accumulates every proposed
+  # block's full state transition; nodes 2-4 are light followers.
+  beacon-node1:
+    deploy:
+      resources:
+        limits:   { memory: 800m, cpus: '1.0' }
+        reservations: { memory: 400m }
+  beacon-node2: &beacon-light
+    deploy:
+      resources:
+        limits:   { memory: 400m, cpus: '0.5' }
+        reservations: { memory: 150m }
+  beacon-node3: *beacon-light
+  beacon-node4: *beacon-light
+
+  # Validator holds the four ML-DSA-87 keystores; keeps a slashing-
+  # protection DB. Small resident set but the keystore unlock path
+  # spikes RAM briefly, so give it room.
+  validator:
+    deploy:
+      resources:
+        limits:   { memory: 300m, cpus: '0.5' }
+        reservations: { memory: 120m }
+
+  # Dashboard is Node.js. Mostly idle; a release-pipeline shell-out
+  # spawns bash + docker CLI but those live outside this container.
+  dashboard:
+    deploy:
+      resources:
+        limits:   { memory: 250m, cpus: '0.5' }
+        reservations: { memory: 80m }
