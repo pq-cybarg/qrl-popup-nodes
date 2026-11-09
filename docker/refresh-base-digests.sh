@@ -1,4 +1,7 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# NOTE: requires bash >= 4 for associative arrays. macOS ships bash
+# 3.2 at /bin/bash; install bash from Homebrew or run under a modern
+# bash: `/opt/homebrew/bin/bash ./docker/refresh-base-digests.sh`.
 # Refresh the digest pins on every popup-node Dockerfile's base images.
 #
 # Run this on a monthly cadence (or when a CVE lands against a pinned

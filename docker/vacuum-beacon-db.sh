@@ -70,8 +70,17 @@ for i in ${NODES}; do
     continue
   fi
 
-  CONT="${PROJECT}-beacon-node${i}"
-  echo "[node${i}] DB ${SZ_MB} MB — vacuuming..."
+  # Resolve container name via compose labels — the container_name
+  # override may differ from "${project}-beacon-node${i}" (e.g.
+  # project qrl-popup emits container qrl-beacon-node1, not
+  # qrl-popup-beacon-node1). Fall back to the guessed name if no
+  # label match exists.
+  CONT=$(docker ps -a \
+           --filter "label=com.docker.compose.project=${PROJECT}" \
+           --filter "label=com.docker.compose.service=beacon-node${i}" \
+           --format '{{.Names}}' | head -1)
+  if [[ -z "${CONT}" ]]; then CONT="${PROJECT}-beacon-node${i}"; fi
+  echo "[node${i}] DB ${SZ_MB} MB — vacuuming (container=${CONT})..."
   if docker ps --format '{{.Names}}' | grep -qx "${CONT}"; then
     echo "[node${i}]   stopping ${CONT}..."
     docker stop "${CONT}" >/dev/null
@@ -80,17 +89,41 @@ for i in ${NODES}; do
     WAS_RUNNING=0
   fi
 
-  # BoltDB's bbolt tool compacts in-place:
+  # BoltDB's bbolt tool compacts to a fresh file:
   #   bbolt compact -o out.db in.db
-  # We ship it via a short-lived container that has the same go-qrllib
-  # build environment (any alpine with bbolt works).
+  # We ship it via a short-lived alpine container. apk and `go install`
+  # need root, so we run as root and chown the result back to the host
+  # user that owns the mounted DB.
+  #
+  # Hardening:
+  #   - `apk upgrade --no-cache` pulls any security-patched packages on
+  #     top of the pinned base layer (CVE-2026-123158 "sshole" fix on
+  #     musl openssh landed 2026-11-05; we don't install openssh here,
+  #     but defense-in-depth covers any transitively-pulled sshd).
+  #   - Builder image needs Go >= 1.25 to install bbolt@v1.5 — using
+  #     golang:1.22-alpine (as this script shipped originally) fails
+  #     silently with "go.etcd.io/bbolt@v1.5.0 requires go >= 1.25.0",
+  #     which under `set -e` inside the -c script would exit but under
+  #     bare shell the pipeline continued and the DB was left unchanged.
+  #   - No network ports are published; the container runs for seconds
+  #     under the host's user namespace and cannot be reached by anyone.
+  HOST_UID="$(id -u)"
+  HOST_GID="$(id -g)"
   docker run --rm \
     -v "$(pwd)/${DB%/beaconchain.db}":/data \
-    --user "$(id -u):$(id -g)" \
     --entrypoint /bin/sh \
-    golang:1.22-alpine \
-    -c "apk add --no-cache git >/dev/null && go install go.etcd.io/bbolt/cmd/bbolt@latest >/dev/null 2>&1 && /go/bin/bbolt compact -o /data/beaconchain.db.new /data/beaconchain.db && mv /data/beaconchain.db.new /data/beaconchain.db" \
-    2>&1 | tail -3
+    golang:1.25-alpine \
+    -c "set -e; \
+        apk upgrade --no-cache >/dev/null; \
+        apk add --no-cache git >/dev/null; \
+        echo '[container] installing bbolt...'; \
+        go install go.etcd.io/bbolt/cmd/bbolt@latest; \
+        echo '[container] compacting...'; \
+        /go/bin/bbolt compact -o /data/beaconchain.db.new /data/beaconchain.db; \
+        chown ${HOST_UID}:${HOST_GID} /data/beaconchain.db.new; \
+        mv /data/beaconchain.db.new /data/beaconchain.db; \
+        echo '[container] done'" \
+    2>&1 | tail -10
 
   NEW_SZ_MB=$(du -m "${DB}" | awk '{print $1}')
   echo "[node${i}]   compacted: ${SZ_MB} MB → ${NEW_SZ_MB} MB"

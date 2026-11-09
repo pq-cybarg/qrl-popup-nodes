@@ -17,7 +17,7 @@
 
 # Base image pinned by digest — refresh via docker/refresh-base-digests.sh.
 # See docker/BASE-IMAGE-DIGESTS.md for the "why" (supply-chain).
-ARG RUNTIME_IMAGE=node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+ARG RUNTIME_IMAGE=node:22-alpine@sha256:0e1754758c2df4cfa3e68d59e2e1b7374bb7fd9ea6328eaaacf15cc934af8202
 ARG GO_BUILDER_IMAGE=golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59
 
 # --- builder stage: mldsa87keygen for the container's target arch -----------
@@ -43,7 +43,11 @@ FROM ${RUNTIME_IMAGE} AS runtime
 # release.sh / load-release.sh all shebang to bash and shell out to
 # docker buildx. Paired with the docker-compose.docker-sock.yaml overlay
 # they run from inside the container without needing bare-metal.
-RUN apk add --no-cache ca-certificates tini bash docker-cli docker-cli-buildx \
+# Upgrade first to pick up security-patched packages on top of the
+# pinned base (CVE-2026-123158 sshole / musl openssh — not installed
+# here, but defense-in-depth).
+RUN apk upgrade --no-cache \
+ && apk add --no-cache ca-certificates tini bash docker-cli docker-cli-buildx \
     openssl perl-utils python3
 # openssl: gen-tls-cert.sh
 # perl-utils: shasum (portable alias for `sha256sum -a 256` used by sign/verify-images.sh)
